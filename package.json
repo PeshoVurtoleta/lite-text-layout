@@ -1,0 +1,66 @@
+{
+  "name": "@zakkster/lite-text-layout",
+  "version": "1.0.2",
+  "description": "Zero-GC bitmap font word wrapper. Computes line breaks, kerning-aware widths, and truncation/ellipsis flags into a Float32Array -- feeds directly into @zakkster/lite-bmfont's drawWrapped.",
+  "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
+  "license": "MIT",
+  "type": "module",
+  "main": "./TextLayout.js",
+  "types": "./TextLayout.d.ts",
+  "exports": {
+    ".": {
+      "import": "./TextLayout.js",
+      "types": "./TextLayout.d.ts"
+    }
+  },
+  "files": [
+    "TextLayout.js",
+    "TextLayout.d.ts",
+    "llms.txt",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE.txt"
+  ],
+  "keywords": [
+    "bmfont",
+    "bitmap-font",
+    "text-layout",
+    "word-wrap",
+    "text-wrap",
+    "line-break",
+    "wrap",
+    "ellipsis",
+    "truncate",
+    "kerning",
+    "canvas",
+    "canvas2d",
+    "game-text",
+    "hud",
+    "zero-gc",
+    "zero-alloc",
+    "typed-array"
+  ],
+  "sideEffects": false,
+  "homepage": "https://github.com/PeshoVurtoleta/lite-text-layout#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeshoVurtoleta/lite-text-layout.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PeshoVurtoleta/lite-text-layout/issues",
+    "email": "shinikchiev@yahoo.com"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@zakkster/lite-gc-profiler": "^1.15.0",
+    "@zakkster/lite-leak": "^1.8.1"
+  },
+  "scripts": {
+    "test": "node --test test/TextLayout.test.js",
+    "torture": "node --expose-gc test/torture.mjs",
+    "verify": "npm run test && npm run torture",
+    "prepublishOnly": "npm run verify"
+  }
+}
