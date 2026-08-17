@@ -4,6 +4,59 @@ All notable changes to `@zakkster/lite-text-layout` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-08-18
+
+Documentation made to match the frozen surface. TL1, TL2 and TL3 moved the public
+surface (a new flag value and `countLines`, `TextLayoutError` and the input door,
+the pinned range contract); the README was patched along the way but never
+rebuilt. 1.2.2 rebuilds it on the ecosystem blueprint spine, replaces the
+hand-maintained changelog copies with a single source of truth, and adds two
+executable guards so the docs cannot silently drift from the code again. No
+runtime behaviour change: the only edit to `TextLayout.js` is the `VERSION`
+constant bump; the zero-allocation hot path is byte-identical to 1.2.1 (T6 lanes:
+major 0, minor 0, source gc, arrayBuffers 0).
+
+### Added
+
+- Docs-drift guard (`test/TextLayout.docsdrift.test.js`): reads the runtime export
+  surface from the module (`Object.keys` over the module and the `TextLayout`
+  namespace, never a hardcoded list) and asserts, in both directions, that every
+  export is documented in the README API-reference region (delimited by
+  `<!--API-START-->` / `<!--API-END-->`) and in `llms.txt`, and that every name
+  documented in those regions resolves at runtime. Scoping to the delimited region
+  means a name appearing only in prose cannot satisfy the check.
+- Runnable-snippet test (`test/TextLayout.snippets.test.js`): mechanically extracts
+  the README blocks marked `<!--RUN-->` and executes them, running this package's
+  `computeWrap` / `countLines` over a real `@zakkster/lite-bmfont` `BitmapFont` and
+  asserting line count, flags and widths; the `drawWrapped` line runs through a
+  recording `ctx` stub with an exact blit-count assertion, so the shown example
+  cannot rot without failing.
+- `npm test` rises from 68 to 74.
+
+### Changed
+
+- `README.md` rebuilt on the `LiteSepforge/README.md` blueprint spine (18 sections
+  in order: tagline, badges, positioning H2, table of contents, why-this-exists,
+  what-you-get, a `<details>` core-surface deep dive, API reference, the output
+  buffer / range contract, composability, a `<details>` zero-GC design notes,
+  benchmarks, design decisions, testing, what-this-is-not, ecosystem, license). The
+  `RANGE-CONTRACT` sentinel block is preserved byte-identical (TL3's drift guard
+  holds).
+- Benchmark numbers (TL-20 zero-allocation, TL-21 rescan cost) re-measured this
+  release and stamped with version and machine (`1.2.2, node v26.3.1 arm64`).
+
+### Fixed
+
+- Total-downloads badge pointed at the nonexistent `@zakkster/lite-ext-layout`;
+  corrected to `@zakkster/lite-text-layout`.
+
+### Removed
+
+- Version-by-version changelog duplication from `README.md` and `llms.txt`. Both
+  had gone stale in different ways (`README.md` missing 1.0.2 and 1.2.1;
+  `llms.txt` missing 1.2.1); both now point to `CHANGELOG.md` as the single source
+  of truth. `llms.txt` retains the full API surface.
+
 ## [1.2.1] - 2026-08-17
 
 The range contract, made executable. 1.2.0 stated the output-buffer semantics in

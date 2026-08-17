@@ -5,7 +5,7 @@ Zero-GC word wrapper for ASCII bitmap fonts. Computes line breaks, kerning-aware
 ## Key Facts
 
 - **Package**: `@zakkster/lite-text-layout`
-- **Version**: 1.2.1
+- **Version**: 1.2.2
 - **Bundle**: ~1.1 KB minified, ~0.6 KB gzipped
 - **Dependencies**: 0
 - **License**: MIT
@@ -217,7 +217,7 @@ Characters with `id >= 256` contribute zero advance and reset the kerning contex
 export const FLAG_NORMAL: 0;
 export const FLAG_TRUNCATED: 1;
 export const FLAG_OVERFLOW: 2;
-export const VERSION: '1.2.1';
+export const VERSION: '1.2.2';
 
 // Law 6 -- flags are a value space; compare by equality, never by truthiness.
 export type LineFlag = typeof FLAG_NORMAL | typeof FLAG_TRUNCATED | typeof FLAG_OVERFLOW;
@@ -296,18 +296,4 @@ Follows semver. Patch releases for bug fixes, minor for new features, major for 
 
 ## Changelog
 
-### 1.2.0
-
-- Added `TextLayoutError` and the input door: both entry points validate every argument once, at entry, through one shared validator, and throw an error naming the argument and the requirement. Previously `boxWidth = NaN`, `boxWidth = -100`, `scale = NaN`, `scale = 0`, a short `font.glyphs`, a non-string `text` and a non-`Float32Array` `outBuffer` were all accepted and silently produced NaN widths, no wrapping, or a silent `0`. Fixed: a `\r` immediately before a `\n` is excluded from the emitted range (CRLF now lays out identically to LF); the phantom zero-width line emitted when trailing whitespace soft-breaks immediately before a `\n` is gone, while a deliberate blank line survives. Defined: `boxHeight > 0` with `lineHeight * scale > boxHeight` returns `0` and writes nothing. Documented: leading whitespace is skipped only after a soft break, an over-wide glyph is emitted unflagged, a truncated line's width includes the ellipsis allowance, and indices are exact to 2^24 = 16777216. MINOR -- new export plus new throws on input that was previously accepted and silently wrong. See `decisions/0002-input-door.md`.
-
-### 1.1.0
-
-- Added `FLAG_OVERFLOW = 2`: an undersized `outBuffer` now marks the flags slot of its last written line, so a truncated layout is distinguishable from a genuine short one (was silent, fail-open). Added `countLines(text, font, boxWidth, boxHeight, lineHeight, scale?)` to size a buffer that can never overflow. Froze the `TextLayout` namespace. Zero-capacity buffers (length 0..3) return `0` and write nothing. `FLAG_OVERFLOW` and `FLAG_TRUNCATED` are mutually exclusive in one call. Law 6: compare flags by equality, never by truthiness. MINOR -- see `decisions/0001-flag-overflow.md`.
-
-### 1.0.2
-
-- Ported the test suite to `node:test`, moved it under `test/`, and added a `node --expose-gc test/torture.mjs` gate (`@zakkster/lite-gc-profiler` + `@zakkster/lite-leak`). Added the `VERSION` export, `engines: node >=18`, and an ASCII-only sweep. No behaviour change. See `CHANGELOG.md` for the recorded findings and measured baselines.
-
-### 1.0.0
-
-- Initial release. `computeWrap` with soft-break, hard-break, explicit-newline, truncation with ellipsis flag, and full kerning support.
+Version-by-version history lives in `CHANGELOG.md` (single source of truth).

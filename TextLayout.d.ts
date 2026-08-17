@@ -19,7 +19,7 @@ export const FLAG_TRUNCATED: 1;
 export const FLAG_OVERFLOW: 2;
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION: '1.2.1';
+export const VERSION: '1.2.2';
 
 /**
  * Thrown by both entry points when an argument fails the input door (1.2.0).
