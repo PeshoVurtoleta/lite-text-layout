@@ -24,9 +24,20 @@
  * Peers (lite-gc-profiler, lite-leak) are devDependencies only. TextLayout.js
  * has zero runtime dependencies.
  *
+ * WATCHDOG: the tiers run synchronously, so a non-terminating tier (see TL-27 --
+ * a broken countLines invariant hangs instead of failing) would block the event
+ * loop forever. A same-process `setTimeout` cannot fire while the loop is wedged,
+ * so it would be useless against exactly that hang. Instead this entry point
+ * FORKS itself: the parent spawns the child that runs the tiers and guards it
+ * with a wall-clock timer from its own free event loop, killing the child and
+ * exiting non-zero if the run exceeds WATCHDOG_MS. The guard lives in a separate
+ * process, so it cannot perturb the T6/T7 measured windows. A gate that can hang
+ * forever has stopped being a gate.
+ *
  * @license MIT
  */
 
+import { spawn } from 'node:child_process';
 import { SEED, BREAK, finish } from './torture/harness.mjs';
 import { run as t0 } from './torture/t0-laws.mjs';
 import { run as t1 } from './torture/t1-degenerate.mjs';
@@ -80,4 +91,46 @@ function main() {
     process.exit(0);
 }
 
-main();
+/** Generous wall-clock bound. The full run is ~1.5s; 120s only ever trips on a
+ * real hang (TL-27), never on a slow-but-progressing run. */
+const WATCHDOG_MS = 120000;
+
+/**
+ * Parent side: spawn this file again as a child (same node flags, so --expose-gc
+ * carries over via execArgv) with the tiers running there, and watchdog it. The
+ * parent event loop stays free, so it can kill a child that has wedged itself in
+ * a synchronous infinite loop -- which a same-process timer could never do.
+ */
+function runWithWatchdog() {
+    const child = spawn(
+        process.execPath,
+        [...process.execArgv, ...process.argv.slice(1)],
+        { stdio: 'inherit', env: { ...process.env, TEXTLAYOUT_TORTURE_CHILD: '1' } },
+    );
+    const timer = setTimeout(() => {
+        process.stderr.write(
+            'torture: FAIL -- watchdog fired: run exceeded ' + WATCHDOG_MS +
+            ' ms; a tier is not terminating (see TL-27). Killing child.\n');
+        child.kill('SIGKILL');
+        process.exit(1);
+    }, WATCHDOG_MS);
+    child.on('error', (err) => {
+        clearTimeout(timer);
+        process.stderr.write('torture: FAIL -- could not spawn child: ' + (err && err.message || err) + '\n');
+        process.exit(1);
+    });
+    child.on('exit', (code, signal) => {
+        clearTimeout(timer);
+        if (signal) {
+            process.stderr.write('torture: FAIL -- child terminated by ' + signal + '\n');
+            process.exit(1);
+        }
+        process.exit(code === null ? 1 : code);
+    });
+}
+
+if (process.env.TEXTLAYOUT_TORTURE_CHILD === '1') {
+    main();
+} else {
+    runWithWatchdog();
+}

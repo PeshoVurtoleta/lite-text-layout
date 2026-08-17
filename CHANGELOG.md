@@ -4,6 +4,105 @@ All notable changes to `@zakkster/lite-text-layout` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-08-17
+
+An undersized buffer must say so. TL1 makes overflow observable, gives callers a
+way to size the buffer, and freezes the namespace. `computeWrap`'s loop body is
+byte-for-byte identical to 1.0.2; only the post-loop tail, a new export, the new
+`countLines` method, comments, and the `Object.freeze` line differ.
+
+### Added
+
+- `export const FLAG_OVERFLOW = 2`. Set on the flags slot of the LAST written
+  line if and only if the same call against an unbounded buffer would have
+  produced more lines (equivalently, iff
+  `countLines(...) > floor(outBuffer.length / 4)`). Distinct from
+  `FLAG_TRUNCATED`: `FLAG_TRUNCATED` means "the TEXT did not fit the BOX" (a
+  designed outcome), `FLAG_OVERFLOW` means "the BUFFER did not fit the TEXT" (a
+  caller bug being reported).
+- `TextLayout.countLines(text, font, boxWidth, boxHeight, lineHeight, scale?)`.
+  Counts the lines `computeWrap` would write into an unbounded buffer -- same
+  parameters, same order, minus `outBuffer`. `new Float32Array(countLines(...) *
+  4)` is the buffer size that can never overflow. A separate function, not an
+  `outBuffer === null` branch, so `computeWrap`'s hot call site stays monomorphic.
+- `Object.freeze(TextLayout)`. The namespace is now frozen; assignment and delete
+  throw `TypeError` in strict mode.
+
+### Changed
+
+- The overflow contract replaces the old "extra content is silently dropped."
+  The partial layout is preserved and is a true PREFIX: for capacity `m` lines
+  the output equals the first `m` lines of the unbounded run, byte-identical
+  except slot `4m - 1`, which carries `FLAG_OVERFLOW`.
+- **Zero-capacity rule:** a buffer with no whole 4-slot stride (length 0..3)
+  returns `0` and writes nothing -- there is no flags slot to signal into. A
+  caller detects a swallowed non-empty layout as `n === 0 && text.length > 0`.
+  It does not throw (that is TL2's door) and does not return a sentinel.
+- **Mutual-exclusivity rule:** `FLAG_OVERFLOW` and `FLAG_TRUNCATED` never both
+  appear in one call's output. A truncating run fits within its cap (the two
+  in-loop truncation returns write four slots and return before the cap is hit),
+  so it can never also overflow. Precedence, written down though it never fires:
+  `FLAG_OVERFLOW` wins, because truncation is designed and overflow is a bug.
+- Law 6, adopted suite-wide: **flags are a value space; compare by equality,
+  never by truthiness.** `if (flags === FLAG_TRUNCATED)`, never `if (flags)`. The
+  documented flag domain may widen in a MINOR release; only equality against a
+  named constant is stable across that widening.
+
+### Fixed
+
+- **TL-01 (S1)** -- Buffer overflow was silent and byte-for-byte
+  indistinguishable from a correct short layout. Now the last written line of an
+  undersized run carries `FLAG_OVERFLOW`, so a 10-word text into
+  `Float32Array(12)` differs from `'AAA BBB CCC'` into it in exactly slot 11.
+  Struck from Known issues.
+- **TL-02 (S3)** -- No `countLines`, so a caller could not size the buffer up
+  front. `countLines` now exists and agrees with `computeWrap` on all 512 T0
+  cases across five box heights, all 50,000 T5 cases, and all 40 `node:test`
+  cases. Struck from Known issues.
+- **TL-11 (S3)** -- `TextLayout` was not frozen. It is now; assignment and delete
+  throw. Struck from Known issues.
+
+### Measured
+
+Recorded so no future session invents work the evidence refutes. Both produced on
+Node v26.3.1 for 1.1.0.
+
+- **`Object.freeze` cost.** 50,000 `computeWrap` calls: 87.5 ms unfrozen vs
+  87.9 ms frozen -- a 0.4% delta, noise. T6 lane 1 reports `verdict: pass` under
+  the freeze, byte-identical to the 1.0.2 TL-20 baseline. The freeze is a
+  one-time module-load cost, not a per-call cost.
+- **`countLines` zero allocation (T6 lane 2).** `measureAllocs(hot2, {
+  iterations: 2000 })` -> `bytesPerCall === 0`, `settled === true`;
+  `measureOps({ ops: 20000, warmup: 1000, stabilize: 'deep' })` +
+  `checkNoGc({ maxMajor: 0, maxPauseMs: 4, maxArrayBuffersGrowth: 0 })` ->
+  `verdict: pass`, major 0, minor 0. A `SINK` accumulator defeats dead-code
+  elimination so a dropped call cannot pass as a zero-alloc call.
+
+### Note on the torture watchdog and TL-27
+
+TL1's own assertion-15 drift mutation (deleting the `lastSpace` reset from
+`countLines`' soft-break) found TL-27 (S3): because `countLines` correctly omits
+`computeWrap`'s `maxLines` top-of-loop break (which doubles as a progress
+backstop), a broken soft-break invariant makes `countLines` loop forever instead
+of returning a wrong count -- e.g. `countLines('AAA   AAAAAA   AAA', F, 46, 0,
+16)` never returns. `countLines` is correct and unchanged (a defensive
+per-iteration guard would be bytes in a hot body); the termination invariant is
+now documented in a comment there, and `test/torture.mjs` gained a 120s
+wall-clock watchdog that forks the tiers into a child and kills it from the
+parent, so a non-terminating tier fails the gate instead of wedging CI silently.
+TL-27 is registered in the roadmap for TL2. This is test/tooling only; no shipped
+file changed for it.
+
+### Semver note
+
+MINOR. The output flag domain widened from `{0, 1}` to `{0, 1, 2}`; value `2` is
+reachable only on a call that was already dropping content silently, and the one
+in-tree consumer (`BitmapFont.drawWrapped`, `if (flags === 1)` at
+`BitmapFont.js:361`) reads the field by equality, so a `2` correctly falls
+through to no ellipsis. The full verdict, its counter-argument, the zero-capacity
+contract, and the precedence proof are recorded in
+`decisions/0001-flag-overflow.md`.
+
 ## [1.0.2] - 2026-08-17
 
 No behaviour change. `computeWrap` is byte-for-byte identical to 1.0.1; this
@@ -61,11 +160,6 @@ uppercase/lowercase `xadvance` 12, space 6, `'.'` 6). None are fixed here; each
 is scheduled for a later session. Severity: S1 data loss/corruption, S2 broken
 guarantee, S3 hygiene/contract gap, S0 verified-good baseline.
 
-- **TL-01 (S1)** -- Buffer overflow is silent and byte-for-byte indistinguishable
-  from a correct short layout. -- A 10-word text into `Float32Array(12)` yields
-  the same buffer as `'AAA BBB CCC'` into it; both last lines `FLAG_NORMAL`.
-- **TL-02 (S3)** -- No `countLines`, so a caller cannot size the buffer up front.
-  -- `typeof TextLayout.countLines === 'undefined'`.
 - **TL-03 (S1)** -- `scale = NaN` poisons every width and silently disables
   wrapping. -- `computeWrap('AAA BBB', F, 40, 0, 16, out, NaN)` -> 1 line,
   `lineWidth === NaN`.
@@ -86,8 +180,6 @@ guarantee, S3 hygiene/contract gap, S0 verified-good baseline.
 - **TL-10 (S2)** -- `outBuffer` type is unchecked. -- `Array(16)` and
   `Float64Array` are accepted; `Int32Array` is accepted and truncates every
   `lineWidth` to an integer.
-- **TL-11 (S3)** -- `TextLayout` is not frozen. -- `Object.isFrozen(TextLayout)`
-  is `false`; `TextLayout.computeWrap2 = () => {}` succeeds.
 - **TL-12 (S3)** -- A truncated line's `lineWidth` includes the ellipsis
   allowance, stated only in the `.d.ts`. -- `54 = content 36 + ellipsis 18`.
 - **TL-13 (S2)** -- `\r` is inside the emitted line range but not in `lineWidth`.
@@ -147,4 +239,5 @@ on Node v26.3.1 for 1.0.2.
   reads per character at 10,150 chars over 550 lines; 1.33 at 6,000 chars. The
   rescan after a soft break costs about a third of a pass, not a second pass.
 
+[1.1.0]: https://github.com/PeshoVurtoleta/lite-text-layout
 [1.0.2]: https://github.com/PeshoVurtoleta/lite-text-layout

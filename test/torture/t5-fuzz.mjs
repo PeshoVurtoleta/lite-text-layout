@@ -27,7 +27,7 @@
  * the exact same comparator this tier uses.
  */
 
-import { TextLayout } from '../../TextLayout.js';
+import { TextLayout, FLAG_OVERFLOW } from '../../TextLayout.js';
 import { SEED, FONT, makePrng, makeCorpus, knownFailing, die } from './harness.mjs';
 import { oracleWrap } from './oracle.mjs';
 
@@ -36,6 +36,18 @@ const MAXLINES = 1024;   // corpus text length is bounded well under 1024 lines
 
 /** Reused output buffer, allocated once. */
 const OUT = new Float32Array(4 * MAXLINES);
+
+// --- D1 fixtures: countLines agreement, prefix law, FLAG_OVERFLOW iff --------
+// All allocated ONCE. The oracle is NOT involved and its domain stays
+// boxHeight 0; these draw a per-case box height instead.
+const BOX_HEIGHTS = [0, 16, 32, 48, 1e9];
+/** Unbounded buffer for the agreement + prefix comparison, allocated once. */
+const OUT_BIG = new Float32Array(4 * MAXLINES);
+// Eight fixed-capacity buffers indexed by clamp(m, 8). OUT_BIG.subarray would
+// allocate a view object per case -- exactly the churn T6 exists to forbid --
+// so the capacities are pre-built here and reused. Index 0 is unused (m >= 1).
+const CAPBUFS = [];
+for (let c = 0; c <= 8; c++) CAPBUFS[c] = new Float32Array(4 * c);
 
 /** One f32 ULP at `x`. */
 export function f32ulp(x) {
@@ -68,6 +80,9 @@ export function run() {
     // Corpus built ONCE, before the loop. Same seed as T0, so T0's 512 cases are
     // the first 512 here.
     const corpus = makeCorpus(makePrng(SEED), CASES);
+    // A SEPARATE prng for the per-case box height and capacity draws, so the
+    // corpus stream (and therefore the divergence count) is undisturbed.
+    const prng2 = makePrng(SEED ^ 0x5bd1e995);
 
     let divergences = 0;
     let tl26 = 0;
@@ -91,6 +106,51 @@ export function run() {
                 }
             }
         }
+
+        // --- D1: agreement + prefix law + FLAG_OVERFLOW iff, per case --------
+        // Independent of the oracle comparison above (it reads OUT and ref; this
+        // reads OUT_BIG and CAPBUFS and touches neither). Draw a box height so
+        // truncating input is exercised too.
+        const bh = BOX_HEIGHTS[prng2() % 5];
+        const need = TextLayout.computeWrap(text, FONT, boxWidth, bh, 16, OUT_BIG, scale);
+        for (let k = 0; k < need; k++) {
+            if (OUT_BIG[k * 4 + 3] === FLAG_OVERFLOW) {
+                die('T5 agreement: OUT_BIG too small (case ' + ci + ' bh ' + bh + ') -- comparison vacuous');
+            }
+        }
+        const cl = TextLayout.countLines(text, FONT, boxWidth, bh, 16, scale);
+        if (cl !== need) {
+            die('T5 agreement: countLines ' + cl + ' != computeWrap ' + need +
+                ' (case ' + ci + ' seed=' + SEED + ' bh ' + bh + ' boxWidth ' + boxWidth + ' scale ' + scale + ')');
+        }
+        // Prefix law + overflow iff. Capacity = clamp(m, 8) lines.
+        const m = 1 + (prng2() % (need + 1));
+        const cap = m < 8 ? m : 8;
+        const buf = CAPBUFS[cap];
+        const got = TextLayout.computeWrap(text, FONT, boxWidth, bh, 16, buf, scale);
+        const expectN = need < cap ? need : cap;
+        if (got !== expectN) {
+            die('T5 prefix: computeWrap into cap ' + cap + ' returned ' + got + ' != ' + expectN + ' (case ' + ci + ')');
+        }
+        const overflowed = need > cap;   // countLines > floor(buf.length / 4)
+        for (let j = 0; j < expectN * 4; j++) {
+            if (overflowed && j === (expectN - 1) * 4 + 3) {
+                if (buf[j] !== FLAG_OVERFLOW) {
+                    die('T5 iff: overflow slot ' + j + ' not FLAG_OVERFLOW (case ' + ci + ' cap ' + cap + ' need ' + need + ')');
+                }
+            } else if (buf[j] !== OUT_BIG[j]) {
+                die('T5 prefix: slot ' + j + ' ' + buf[j] + ' != unbounded ' + OUT_BIG[j] +
+                    ' (case ' + ci + ' cap ' + cap + ' need ' + need + ')');
+            }
+        }
+        if (expectN > 0) {
+            const flagged = buf[(expectN - 1) * 4 + 3] === FLAG_OVERFLOW;
+            if (flagged !== overflowed) {
+                die('T5 iff: FLAG_OVERFLOW ' + flagged + ' != (need>cap) ' + overflowed +
+                    ' (case ' + ci + ' cap ' + cap + ' need ' + need + ')');
+            }
+        }
+
         if (!diverged) continue;
 
         divergences++;

@@ -7,6 +7,13 @@
  * line naming the deferral (and TL-25) and returns -- not a die(), not a silent
  * no-op.
  *
+ * FLAG_OVERFLOW (TL1): the new value 2 is inert in the one in-tree consumer.
+ * `BitmapFont.drawWrapped` draws the ellipsis under `if (flags === 1)`
+ * (BitmapFont.js:361), so a 2 fails that equality and falls through to no
+ * ellipsis -- exactly right for an overflow line. TL3 asserts that conformance
+ * against drawWrapped once the bmfont devDependency arrives; there is no bmfont
+ * import here.
+ *
  * Ledger notes for two findings that live at this boundary:
  *
  * - TL-22 (S3): the README does not follow the suite blueprint. Deliberately NO

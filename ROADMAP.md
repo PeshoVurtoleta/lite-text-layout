@@ -9,7 +9,7 @@ discarded; every one of them is re-anchored to a finding ID below.
 waiting for consumers. I pulled the source and ran it. The zero-allocation
 claim is TRUE and measured (TL-20) -- but eleven distinct inputs produce
 silently wrong output, the package cannot be tested under the suite's own
-runner, and there is no gate of any kind. Twenty-six findings are listed in
+runner, and there is no gate of any kind. Twenty-seven findings are listed in
 section 2 and all but two were **reproduced by execution**, not inferred from
 reading; the one exception is marked `read, not run` and says so in the table.
 TL-26 was found by the TL0 torture suite itself.
@@ -149,6 +149,7 @@ until the TL0 torture suite pinned it with a live, die-on-fix entry in
 | **TL-22** | S3 | **The README does not follow the suite blueprint.** Its spine is emoji-headed (`What is` / `Install` / `Quick Start` / `Why a separate package?` / `Layout buffer format` / `Wrapping rules` / `Truncation` / `API` / `Benchmark` / `TypeScript` / `LLM-Friendly Documentation` / `Changelog` / `License`). Against `LiteSepforge/README.md` it is missing: the positioning H2, the TOC, "Why this exists", "What you get", the `<details>` core-surface deep dive, the constants table, "Composability" with a full end-to-end pipeline, the `<details>` Zero-GC design notes with an allocation table, "Design decisions worth knowing", "Testing", "What this is not", and "Ecosystem". The emoji headings are themselves part of TL-17. | compare `README.md` to `LiteSepforge/README.md` |
 | **TL-23** | S3 | *(read, not run)* **`lastSpaceWidth` is not reset at any line break.** Only `lastSpace = -1` is reset, in several separate places. The stale width is harmless today because it is read only when `lastSpace !== -1`, but the correctness of every soft-break width rests on all those resets staying in sync. One missed reset is a silently wrong `lineWidth`, not a crash. | `TextLayout.js:74`, resets at 116, 174, 190 |
 | **TL-24** | S3 | **A single glyph wider than `boxWidth` produces a line wider than the box.** The hard-break path re-seeds `cursorX` from the glyph's own `xadvance` and does not re-check `boxWidth`; the `i > lineStart` guard is what prevents an infinite loop, and the cost of that guard is an over-wide line. Related to TL-07: neither over-wide nor over-tall has a decided policy. | `computeWrap('AB', FONT, 8, 0, 16, out)` -> 2 lines, each `lineWidth` 12 against a `boxWidth` of 8, both `FLAG_NORMAL`; source at `TextLayout.js:196`, guard at 144 |
+| **TL-27** | S3 | **`countLines` has no loop bound, so a broken progress invariant hangs instead of failing.** `computeWrap`'s `if (lineCount >= maxLines) break;` is not only a capacity cap -- it is also the backstop that makes a non-advancing `lineStart` terminate with wrong output rather than spin forever. `countLines` deliberately omits it (there is no buffer to cap), so the same defect becomes an infinite loop. Not reachable in correct code: `lastSpace` is only set when `i > lineStart`, so `nextStart = lastSpace + 1 > lineStart` and `lineStart` strictly increases. But a hang is the worst failure mode under the fail-closed law -- no signal at all, and CI wedges rather than reporting. **Found by TL1's own drift mutation**, which is what the mutation was for. Two consequences: the torture entry point needs a watchdog so any future hang exits non-zero, and the termination invariant needs to be written where the next editor will see it. | delete the soft-break `lastSpace = -1;` from `countLines`, then `countLines('AAA   AAAAAA   AAA', F, 46, 0, 16)` never returns; the same mutation in `computeWrap` returns a wrong count and terminates |
 | **TL-26** | **S2** | **A phantom zero-width line appears when trailing whitespace soft-breaks immediately before a `\n`.** The package ships a pinned test named "does not emit a phantom trailing line for text ending in `\n`", and it passes -- for `'A\n'`. Add trailing spaces wide enough to force a soft break and the guarantee fails: the space-eater advances `lineStart` past the run, the `\n` branch then emits the empty span before it, and the caller gets a line with no content. Width-dependent, so the same text yields a different line count purely as a function of `boxWidth`. **Found by the TL0 torture suite** after the T5 corpus was widened to emit multi-space runs -- the first finding in this document produced by the gate rather than by a hand probe. Belongs to the TL2 whitespace family with TL-13 and TL-14. | `computeWrap('AAA  \n', F, 40, 0, 16, out)` -> 2, `[[0,3,36],[5,5,0]]`; `computeWrap('AAA\n', ...)` -> 1; `computeWrap('AAA  ', ...)` -> 1 |
 | **TL-25** | **S2** | **Cross-package scale is applied twice.** `computeWrap` multiplies every advance by `scale`, so `lineWidth` is already at the rendered scale. `BitmapFont.drawWrapped` then computes alignment as `boxWidth - lineWidth * scale` with a comment asserting "`lineWidth` is at scale=1 per contract" (`BitmapFont.js:295-299`). Passing the same `scale` to both -- which the README's own Full Example does, with `scale: 1`, where the bug is invisible -- mis-aligns every centred or right-aligned line by a factor of `scale`. Two packages hold two different beliefs about one number, which is exactly the failure the FORMAT contract exists to prevent. | `computeWrap('AAAA BBBB', F, 0,0,16,out, s)` -> `lineWidth` 51 / 102 / 204 for s = 0.5 / 1 / 2, each equal to the true rendered width. `drawWrapped` then uses `lineWidth * s` = 25.5 / 102 / 408 -- wrong by a factor of `s` at every scale but 1 |
 
@@ -424,7 +425,7 @@ Shippable today (bmfont v1.2.0, public surface only):
   TL3, not a silent edit on either side.
 - **Format conformance**: assert the stride is 4, the slot order is
   `[startIdx, endIdx, lineWidth, flags]`, and that `drawWrapped` tests
-  `flags === 1` by equality (`BitmapFont.js:331`) -- which is what makes
+  `flags === 1` by equality (`BitmapFont.js:361`) -- which is what makes
   `FLAG_OVERFLOW = 2` additive rather than breaking.
 
 Deferred to TL5 and stated as blocked, not silently omitted:
@@ -493,7 +494,7 @@ depends on it.
 ---
 package: "@zakkster/lite-text-layout"
 version_target: 1.0.2
-status: planned
+status: shipped
 gc_maxMajor: 0
 gc_maxPauseMs: 4
 alloc_bytes_per_op: 0
@@ -614,7 +615,7 @@ THE SEMVER DECISION (commit to it before coding)
        that is, only on a call whose output is already wrong today. No call
        that behaves correctly today can start seeing a 2.
     2. The one in-ecosystem consumer reads the field by equality:
-       `BitmapFont.drawWrapped` does `if (flags === 1)` (BitmapFont.js:331).
+       `BitmapFont.drawWrapped` does `if (flags === 1)` (BitmapFont.js:361).
        A 2 falls through to no ellipsis, which is exactly right.
     3. The documented contract lists two values, so a consumer with an
        `if/else` treating "not 0" as truncated would now draw an ellipsis on
@@ -798,6 +799,15 @@ TASKS
   - TL-23: reset `lastSpaceWidth` alongside every `lastSpace = -1`, or hoist
     both into one small reset. It is not a live bug; it is several places that
     must stay in sync, and the T5 fuzz is what proves they do.
+  - **Inherited from TL1's QA: add the missing T5 flag tripwire.** Two universal
+    claims hold today but have no standalone instrument -- every flags slot is in
+    `{0, 1, 2}`, and no single output ever carries both a `FLAG_TRUNCATED` and a
+    `FLAG_OVERFLOW` line. TL1's QA measured them directly (0 violations over
+    161,249 flag slots across the 50,000-case corpus) but they survive only as an
+    emergent consequence of the per-case iff check plus an unreachability proof
+    written in prose. `t5-fuzz.mjs` does not even import `FLAG_TRUNCATED`. TL2
+    edits the whitespace and newline machinery those claims rest on, so it is the
+    session that must give them their own check before it starts.
   - Extend torture T1 to cross every parameter with every degenerate value and
     pin the post-door answer for each -- throw, defined result, or documented.
   - Extend T2 with the buffer-type rows now that they have a policy.
@@ -1229,7 +1239,7 @@ No gate output is a FAIL.
 
 ### The habit this roadmap is built around
 
-Twenty-four of the twenty-six findings in section 2 came from running the
+Twenty-five of the twenty-seven findings in section 2 came from running the
 code, and TL-26 came from the gate this roadmap specified rather than from a
 hand probe -- which is the whole point of building it. The two that did not say so in the table, and both are the mildest things
 in the document. TL-25 started as a reading of the *peer* rather than of this

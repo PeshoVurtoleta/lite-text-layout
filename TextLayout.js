@@ -7,24 +7,51 @@
  * `BitmapFont.drawWrapped` consumes directly.
  *
  * Stride: 4 floats per line -> `[startIdx, endIdx, lineWidth, flags]`
- * Flags:  `0` = normal line, `1` = truncated (renderer appends "...")
+ * Flags:  `0` = normal line, `1` = truncated (the TEXT did not fit the BOX --
+ *         renderer appends "..."), `2` = overflow (the BUFFER did not fit the
+ *         TEXT -- a caller bug, see FLAG_OVERFLOW and decisions/0001-flag-overflow.md).
+ *         Flags are a value space: compare by equality, never by truthiness.
  */
 
 /** Normal line -- no truncation marker. */
 export const FLAG_NORMAL = 0;
 /** Truncated line -- the renderer should append "..." after the line content. */
 export const FLAG_TRUNCATED = 1;
+/**
+ * Overflow line -- the last written line when the buffer was too small for the
+ * text. `FLAG_TRUNCATED` means "the TEXT did not fit the BOX" (a designed
+ * outcome, ellipsis included); `FLAG_OVERFLOW` means "the BUFFER did not fit the
+ * TEXT" (a caller bug being reported). They are never both present in one call.
+ * See decisions/0001-flag-overflow.md and `countLines` for sizing the buffer so
+ * this never fires.
+ */
+export const FLAG_OVERFLOW = 2;
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION = '1.0.2';
+export const VERSION = '1.1.0';
 export const TextLayout = {
     /**
      * Compute line breaks for `text` against a bounding box.
      *
      * The output is written into `outBuffer` as packed 4-tuples
      * `[startIdx, endIdx, lineWidth, flags]` per line. The buffer's capacity
-     * caps the line count at `floor(outBuffer.length / 4)`; extra content is
-     * silently dropped.
+     * caps the line count at `floor(outBuffer.length / 4)`.
+     *
+     * Overflow contract (an undersized buffer must say so):
+     * - `FLAG_OVERFLOW` (2) is set on the flags slot of the LAST written line if
+     *   and only if the same call against an unbounded buffer would have produced
+     *   MORE lines -- equivalently, iff `countLines(...) > floor(outBuffer.length / 4)`.
+     * - The partial layout is preserved and is a true PREFIX: for capacity `m`
+     *   lines the output equals the first `m` lines of the unbounded run,
+     *   byte-identical except slot `4m - 1`, which carries `FLAG_OVERFLOW`.
+     * - Zero capacity (buffer length 0..3, no whole stride) returns `0` and
+     *   writes NOTHING -- there is no flags slot to signal into. A caller detects
+     *   a swallowed non-empty layout as `n === 0 && text.length > 0`. It does not
+     *   throw and does not return a sentinel.
+     * - `FLAG_OVERFLOW` and `FLAG_TRUNCATED` are mutually exclusive in one call
+     *   (a truncating run fits its cap, so it never overflows). Compare flags by
+     *   equality, never by truthiness. Use `countLines` to size a buffer that can
+     *   never overflow: `new Float32Array(countLines(...) * 4)`.
      *
      * Wrapping rules:
      * - Soft-break at the last space (` `, code 32) when adding the next glyph
@@ -214,14 +241,143 @@ export const TextLayout = {
         }
 
         // -- 5. Flush remainder ----------------------------------------------
-        if (lineCount < maxLines && lineStart < len) {
-            outBuffer[ptr++] = lineStart;
-            outBuffer[ptr++] = len;
-            outBuffer[ptr++] = cursorX;
-            outBuffer[ptr++] = FLAG_NORMAL;
-            lineCount++;
+        // There is content past the last written line iff `lineStart < len`.
+        // If a line slot is free the remainder becomes a real line; otherwise the
+        // buffer was too small and we mark the last written line FLAG_OVERFLOW.
+        // ptr === 4 * lineCount on every path that reaches here (the two in-loop
+        // truncation sites write four slots and return immediately), and
+        // maxLines >= 1 (zero capacity returned at the top), so ptr - 1 is the
+        // flags slot of the last written line. One test, once, on the cold side.
+        if (lineStart < len) {
+            if (lineCount < maxLines) {
+                outBuffer[ptr++] = lineStart;
+                outBuffer[ptr++] = len;
+                outBuffer[ptr++] = cursorX;
+                outBuffer[ptr++] = FLAG_NORMAL;
+                lineCount++;
+            } else {
+                outBuffer[ptr - 1] = FLAG_OVERFLOW;
+            }
         }
+
+        return lineCount;
+    },
+
+    /**
+     * Count the lines `computeWrap` would write for `text` against a bounding
+     * box, with no buffer and therefore no cap. Same parameters as
+     * `computeWrap`, same order, minus `outBuffer`.
+     *
+     * This is the sizing companion to `computeWrap`'s overflow contract:
+     * `new Float32Array(countLines(text, font, boxWidth, boxHeight, lineHeight,
+     * scale) * 4)` is the buffer size that can never overflow. It agrees with
+     * `computeWrap` on every wrapping and truncating call by construction -- the
+     * line-ending logic (newline, advance, kerning, soft-break at the last space,
+     * space-eater, wrap test, hard-break reseed) is identical; only the output
+     * machinery and the buffer cap are absent. A truncation ends counting exactly
+     * as it ends writing: at `lineCount + 1`.
+     *
+     * @param {string} text                        Source text.
+     * @param {{ glyphs: Int16Array, kerning: Int16Array }} font
+     *   Object exposing the flat glyph/kerning tables.
+     * @param {number} boxWidth                    Container width in px. `0` = no horizontal limit.
+     * @param {number} boxHeight                   Container height in px. `0` = no vertical limit (no truncation).
+     * @param {number} lineHeight                  Line advance in px (at scale=1).
+     * @param {number} [scale=1.0]                 Font scale multiplier applied to widths.
+     * @returns {number}                           Number of lines `computeWrap` would write into an unbounded buffer.
+     */
+    countLines(text, font, boxWidth, boxHeight, lineHeight, scale = 1.0) {
+        const len = text.length;
+        if (len === 0) return 0;
+
+        let lineCount = 0;
+
+        let lineStart = 0;
+        let lastSpace = -1;
+
+        let cursorX = 0;
+        let prevId = -1;
+
+        // TERMINATION INVARIANT (TL-27): a soft break advances `lineStart` to
+        // `lastSpace + 1`, and `lastSpace` is only ever set at `i > lineStart`
+        // (the soft-break candidate guard below), so `lastSpace >= lineStart` and
+        // `lineStart` strictly increases across every soft break -- the loop makes
+        // progress and terminates. Unlike `computeWrap` there is NO `maxLines`
+        // break to double as a progress backstop, so a future edit that lets
+        // `lastSpace` go stale (point before `lineStart`) would send `i` backward
+        // and HANG here rather than return a wrong count. Do not add a defensive
+        // per-iteration guard (bytes in a hot body); TL2 owns any guard decision.
+        for (let i = 0; i < len; i++) {
+            const id = text.charCodeAt(i);
+
+            // -- 1. Explicit newline -----------------------------------------
+            if (id === 10) {
+                if (boxHeight > 0 && (lineCount + 2) * lineHeight * scale > boxHeight && i < len - 1) {
+                    return lineCount + 1;
+                }
+
+                lineCount++;
+
+                lineStart = i + 1;
+                lastSpace = -1;
+                cursorX = 0;
+                prevId = -1;
+                continue;
+            }
+
+            // -- 2. Glyph advance + kerning ----------------------------------
+            let advance = 0;
+            if (id >= 0 && id < 256) {
+                if (prevId !== -1) advance += font.kerning[(prevId << 8) | id] * scale;
+                advance += font.glyphs[id * 7 + 6] * scale;
+            }
+
+            // Mark soft-break candidate.
+            if (id === 32 && i > lineStart) {
+                lastSpace = i;
+            }
+
+            // -- 4. Wrap / overflow ------------------------------------------
+            if (boxWidth > 0 && cursorX + advance > boxWidth && i > lineStart) {
+
+                if (boxHeight > 0 && (lineCount + 2) * lineHeight * scale > boxHeight) {
+                    return lineCount + 1;
+                }
+
+                if (lastSpace !== -1) {
+                    lineCount++;
+
+                    let nextStart = lastSpace + 1;
+                    while (nextStart < len && text.charCodeAt(nextStart) === 32) nextStart++;
+
+                    lineStart = nextStart;
+                    i = nextStart - 1;
+                    lastSpace = -1;
+                    cursorX = 0;
+                    prevId = -1;
+                    continue;
+                }
+
+                lineCount++;
+
+                lineStart = i;
+                lastSpace = -1;
+                prevId = -1;
+
+                cursorX = (id >= 0 && id < 256) ? font.glyphs[id * 7 + 6] * scale : 0;
+                prevId = (id >= 0 && id < 256) ? id : -1;
+                continue;
+            }
+
+            cursorX += advance;
+            prevId = (id >= 0 && id < 256) ? id : -1;
+        }
+
+        // -- 5. Flush remainder ----------------------------------------------
+        if (lineStart < len) lineCount++;
 
         return lineCount;
     }
 };
+
+Object.freeze(TextLayout);

@@ -9,14 +9,26 @@
 
 /** Normal line -- no truncation marker. */
 export const FLAG_NORMAL: 0;
-/** Truncated line -- the renderer should append "..." after the line content. */
+/** Truncated line -- the TEXT did not fit the BOX; the renderer appends "...". */
 export const FLAG_TRUNCATED: 1;
+/**
+ * Overflow line -- the BUFFER did not fit the TEXT. Set on the last written line
+ * when `outBuffer` was too small; a caller bug, distinct from `FLAG_TRUNCATED`.
+ * See decisions/0001-flag-overflow.md and `countLines`.
+ */
+export const FLAG_OVERFLOW: 2;
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION: '1.0.2';
+export const VERSION: '1.1.0';
 
-/** One of the two flag values written into the layout buffer. */
-export type LineFlag = typeof FLAG_NORMAL | typeof FLAG_TRUNCATED;
+/**
+ * One of the three flag values written into the layout buffer.
+ *
+ * Law 6 -- flags are a value space; compare by equality, never by truthiness.
+ * `if (flags === FLAG_TRUNCATED)`, never `if (flags)`. The domain may widen in a
+ * MINOR release; only equality against a named constant is stable across that.
+ */
+export type LineFlag = typeof FLAG_NORMAL | typeof FLAG_TRUNCATED | typeof FLAG_OVERFLOW;
 
 /**
  * The subset of `BitmapFont` that `computeWrap` reads. Any object with these
@@ -43,7 +55,7 @@ export interface LayoutLine {
     endIdx: number;
     /** Pixel width of the line, including any ellipsis allowance. */
     lineWidth: number;
-    /** {@link FLAG_NORMAL} or {@link FLAG_TRUNCATED}. */
+    /** {@link FLAG_NORMAL}, {@link FLAG_TRUNCATED} or {@link FLAG_OVERFLOW}. */
     flags: LineFlag;
 }
 
@@ -53,8 +65,13 @@ export const TextLayout: {
      * result into `outBuffer` as packed 4-tuples
      * `[startIdx, endIdx, lineWidth, flags]` per line.
      *
-     * Capacity caps the line count at `floor(outBuffer.length / 4)` -- extra
-     * content is silently dropped.
+     * Capacity caps the line count at `floor(outBuffer.length / 4)`. When the
+     * buffer is too small, the last written line's flags slot is set to
+     * {@link FLAG_OVERFLOW} (iff `countLines(...) > floor(outBuffer.length / 4)`);
+     * the partial layout is a true prefix of the unbounded result. A
+     * zero-capacity buffer (length 0..3) returns `0` and writes nothing -- detect
+     * it as `n === 0 && text.length > 0`. Use {@link countLines} to size a buffer
+     * that can never overflow.
      *
      * @param text        Source string.
      * @param font        Object exposing the flat glyph/kerning tables; a
@@ -74,6 +91,28 @@ export const TextLayout: {
         boxHeight: number,
         lineHeight: number,
         outBuffer: Float32Array,
+        scale?: number
+    ): number;
+
+    /**
+     * Count the lines {@link computeWrap} would write into an unbounded buffer --
+     * same parameters, same order, minus `outBuffer`. Size a buffer that can
+     * never overflow as `new Float32Array(countLines(...) * 4)`.
+     *
+     * @param text        Source string.
+     * @param font        Object exposing the flat glyph/kerning tables.
+     * @param boxWidth    Container width in px. `0` = no horizontal limit.
+     * @param boxHeight   Container height in px. `0` = no vertical limit.
+     * @param lineHeight  Line advance in px (at scale=1).
+     * @param scale       Font scale multiplier. Defaults to `1`.
+     * @returns           Number of lines an unbounded `computeWrap` would write.
+     */
+    countLines(
+        text: string,
+        font: BitmapFontData,
+        boxWidth: number,
+        boxHeight: number,
+        lineHeight: number,
         scale?: number
     ): number;
 };

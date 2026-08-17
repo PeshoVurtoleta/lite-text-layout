@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { TextLayout, FLAG_NORMAL, FLAG_TRUNCATED } from '../TextLayout.js';
+import { TextLayout, FLAG_NORMAL, FLAG_TRUNCATED, FLAG_OVERFLOW } from '../TextLayout.js';
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -416,5 +416,98 @@ describe('TextLayout.computeWrap -- zero-allocation contract', () => {
             const n = TextLayout.computeWrap('AB CD', font, 30, 0, 20, out);
             assert.equal(n, 2);
         }
+    });
+});
+
+// -----------------------------------------------------------------------------
+// Overflow reporting and countLines (TL1)
+// -----------------------------------------------------------------------------
+
+describe('overflow reporting and countLines', () => {
+    // Ten words of 3 glyphs each wrap one-per-line at boxWidth 40 -> 10 lines.
+    const TEN = 'AAA BBB CCC DDD AAA BBB CCC DDD AAA BBB';
+    const THREE = 'AAA BBB CCC';
+
+    it('exports FLAG_OVERFLOW === 2 with all three flags pairwise distinct', () => {
+        assert.equal(FLAG_OVERFLOW, 2);
+        assert.notEqual(FLAG_NORMAL, FLAG_TRUNCATED);
+        assert.notEqual(FLAG_NORMAL, FLAG_OVERFLOW);
+        assert.notEqual(FLAG_TRUNCATED, FLAG_OVERFLOW);
+    });
+
+    it('flags the last written line FLAG_OVERFLOW when the buffer is too small', () => {
+        const font = makeFont();
+        const out = buf(1);   // one line of capacity, ten lines of text
+        const n = TextLayout.computeWrap(TEN, font, 40, 0, 16, out, 1);
+        assert.equal(n, 1);
+        assert.equal(out[3], FLAG_OVERFLOW);
+    });
+
+    it('makes overflow distinguishable: TL-01 both directions, short text unflagged', () => {
+        const font = makeFont();
+        const a = buf(3);
+        const nA = TextLayout.computeWrap(TEN, font, 40, 0, 16, a, 1);
+        const b = buf(3);
+        const nB = TextLayout.computeWrap(THREE, font, 40, 0, 16, b, 1);
+        assert.equal(nA, 3);
+        assert.equal(nB, 3);
+        assert.equal(a[11], FLAG_OVERFLOW);   // overflow marked
+        assert.equal(b[11], FLAG_NORMAL);      // genuine short layout unflagged
+        // The two 12-slot buffers now differ, and differ ONLY in slot 11.
+        let diffCount = 0;
+        let diffAt = -1;
+        for (let j = 0; j < 12; j++) if (a[j] !== b[j]) { diffCount++; diffAt = j; }
+        assert.equal(diffCount, 1);
+        assert.equal(diffAt, 11);
+    });
+
+    it('carries no FLAG_OVERFLOW when the buffer fits exactly', () => {
+        const font = makeFont();
+        const out = buf(3);
+        const n = TextLayout.computeWrap(THREE, font, 40, 0, 16, out, 1);
+        assert.equal(n, 3);
+        for (let j = 0; j < 12; j++) assert.notEqual(out[j], FLAG_OVERFLOW);
+    });
+
+    it('returns 0 and writes nothing for zero-capacity buffers (length 0..3)', () => {
+        const font = makeFont();
+        for (let cap = 0; cap <= 3; cap++) {
+            const out = new Float32Array(cap).fill(-12345);
+            const snap = Float32Array.from(out);
+            const n = TextLayout.computeWrap(TEN, font, 40, 0, 16, out, 1);
+            assert.equal(n, 0);
+            assert.deepEqual(Array.from(out), Array.from(snap));   // untouched
+        }
+    });
+
+    it('countLines agrees with computeWrap on a wrapping case', () => {
+        const font = makeFont();
+        const big = buf(64);
+        const cw = TextLayout.computeWrap(TEN, font, 40, 0, 16, big, 1);
+        const cl = TextLayout.countLines(TEN, font, 40, 0, 16, 1);
+        assert.equal(cl, cw);
+        assert.equal(cl, 10);
+    });
+
+    it('countLines agrees with computeWrap on a truncating case (boxHeight 32)', () => {
+        const font = makeFont();
+        const big = buf(64);
+        const cw = TextLayout.computeWrap(TEN, font, 40, 32, 16, big, 1);
+        const cl = TextLayout.countLines(TEN, font, 40, 32, 16, 1);
+        assert.equal(cl, cw);
+    });
+
+    it('sizing round trip never overflows', () => {
+        const font = makeFont();
+        const need = TextLayout.countLines(TEN, font, 40, 0, 16, 1);
+        const out = new Float32Array(4 * need);
+        const n = TextLayout.computeWrap(TEN, font, 40, 0, 16, out, 1);
+        assert.equal(n, need);
+        for (let k = 0; k < n; k++) assert.notEqual(out[k * 4 + 3], FLAG_OVERFLOW);
+    });
+
+    it('freezes the TextLayout namespace: assignment throws', () => {
+        assert.equal(Object.isFrozen(TextLayout), true);
+        assert.throws(() => { TextLayout.computeWrap2 = () => {}; }, TypeError);
     });
 });

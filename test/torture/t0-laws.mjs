@@ -1,7 +1,7 @@
 /**
  * T0 -- metamorphic laws over the shared 512-case corpus (boxHeight = 0).
  *
- * The nine laws (see BRIEF THE HARNESS SPEC / T0):
+ * The ten laws (see BRIEF THE HARNESS SPEC / T0):
  *   1. Partition: 0 <= start <= end <= len, starts non-decreasing, every char
  *      skipped between two lines is a space (32) or newline (10).
  *   2. Width agreement against the independent sumWidth, within one f32 ULP.
@@ -14,23 +14,54 @@
  *   7. No empty line unless it came from an explicit newline.
  *   8. Scale invariance at boxWidth 0: identical ranges, widths multiplied by
  *      exactly the scale within one f32 ULP.
- *   9. TL-02 todo: the countLines agreement law lands in TL1. Guarded so it
- *      deletes itself the moment countLines exists.
+ *   9. Agreement (TL-02): over the 512 cases crossed with
+ *      BOX_HEIGHTS = [0, 16, 32, 48, 1e9] and LH = 16, countLines equals
+ *      computeWrap into an unbounded buffer with no FLAG_OVERFLOW. This runs
+ *      through harness.agreeCount -- the SAME comparator T9 control 3 uses, so
+ *      neither can drift to a weaker comparison. agreeCount die()s on a vacuous
+ *      comparison (a FLAG_OVERFLOW on the computeWrap side).
+ *  10. Sizing round trip: computeWrap into an exact-size Float32Array(4*need),
+ *      need = countLines(...), returns need and carries no FLAG_OVERFLOW.
  *
  * sumWidth is the harness's independent width; the oracle is NOT used here.
  */
 
-import { TextLayout } from '../../TextLayout.js';
-import { SEED, FONT, POISON, makePrng, makeCorpus, sumWidth, check, todo } from './harness.mjs';
+import { TextLayout, FLAG_OVERFLOW } from '../../TextLayout.js';
+import { SEED, FONT, POISON, makePrng, makeCorpus, sumWidth, check, agreeCount } from './harness.mjs';
 
 const CASES = 512;
 const LH = 16;
 const MAXLINES = 1024;
 const FROUND_POISON = Math.fround(POISON);
 
+// Box-height sweep for the countLines agreement law (law 9). Includes 0 (no
+// truncation) and 1e9 (effectively unbounded) so agreement is proved on
+// non-truncating AND truncating input, not just one regime.
+const BOX_HEIGHTS = [0, 16, 32, 48, 1e9];
+
 const CORPUS = makeCorpus(makePrng(SEED), CASES);
 const OUT = new Float32Array(4 * MAXLINES);
 const OUT2 = new Float32Array(4 * MAXLINES);
+
+// The 512 cases crossed with the box-height sweep (2560 comparisons), built once
+// at module load. T0 is NOT a measured tier, so this allocation is fine here --
+// do not copy this shape into T6. Both law 9 (agreement) and law 10 (round trip)
+// run over it.
+const AGREE_CORPUS = (() => {
+    const out = [];
+    for (let ci = 0; ci < CASES; ci++) {
+        for (let bi = 0; bi < BOX_HEIGHTS.length; bi++) {
+            out.push({
+                text: CORPUS[ci].text,
+                boxWidth: CORPUS[ci].boxWidth,
+                boxHeight: BOX_HEIGHTS[bi],
+                lineHeight: LH,
+                scale: CORPUS[ci].scale,
+            });
+        }
+    }
+    return out;
+})();
 
 function f32ulp(x) {
     const f = Math.fround(x);
@@ -196,9 +227,30 @@ export function run() {
         }
     }
 
-    // Law 9 -- the countLines agreement law lands in TL1; this removes itself
-    // the moment countLines exists.
-    check(typeof TextLayout.countLines === 'undefined',
-        () => 'T0 law9: TextLayout.countLines now exists -- promote the TL-02 agreement law');
-    todo('TL-02', 'countLines absent -- the agreement law lands in TL1');
+    // Law 9 -- countLines agreement (TL-02). Run the SHARED comparator over the
+    // 512 cases crossed with the box-height sweep. Zero mismatches; agreeCount
+    // die()s on its own if the computeWrap side ever overflows (a vacuous
+    // comparison). This is the one instrument that catches drift between
+    // countLines and computeWrap, and T9 control 3 proves it is not vacuous by
+    // feeding it a capped stub.
+    const mism = agreeCount(TextLayout.countLines, AGREE_CORPUS);
+    check(mism === 0,
+        () => 'T0 law9 agreement: countLines disagreed with computeWrap on ' + mism + ' of ' +
+            AGREE_CORPUS.length + ' crossed cases');
+
+    // Law 10 -- the sizing round trip. A buffer sized from countLines returns
+    // exactly that count and never overflows. T0 is NOT a measured tier, so the
+    // per-case allocation is allowed here ONLY -- do not copy it into T6.
+    for (let i = 0; i < AGREE_CORPUS.length; i++) {
+        const c = AGREE_CORPUS[i];
+        const need = TextLayout.countLines(c.text, FONT, c.boxWidth, c.boxHeight, c.lineHeight, c.scale);
+        const sized = new Float32Array(4 * need);
+        const nr = TextLayout.computeWrap(c.text, FONT, c.boxWidth, c.boxHeight, c.lineHeight, sized, c.scale);
+        check(nr === need,
+            () => 'T0 law10 round trip: case ' + i + ' sized returned ' + nr + ' != ' + need);
+        for (let k = 0; k < nr; k++) {
+            check(sized[k * 4 + 3] !== FLAG_OVERFLOW,
+                () => 'T0 law10 round trip: case ' + i + ' line ' + k + ' carries FLAG_OVERFLOW');
+        }
+    }
 }

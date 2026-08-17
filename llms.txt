@@ -5,7 +5,7 @@ Zero-GC word wrapper for ASCII bitmap fonts. Computes line breaks, kerning-aware
 ## Key Facts
 
 - **Package**: `@zakkster/lite-text-layout`
-- **Version**: 1.0.2
+- **Version**: 1.1.0
 - **Bundle**: ~1.1 KB minified, ~0.6 KB gzipped
 - **Dependencies**: 0
 - **License**: MIT
@@ -35,7 +35,7 @@ npm i @zakkster/lite-bmfont @zakkster/lite-text-layout
 ## Import
 
 ```javascript
-import { TextLayout, FLAG_NORMAL, FLAG_TRUNCATED } from '@zakkster/lite-text-layout';
+import { TextLayout, FLAG_NORMAL, FLAG_TRUNCATED, FLAG_OVERFLOW } from '@zakkster/lite-text-layout';
 ```
 
 ## Full Example
@@ -93,12 +93,21 @@ Computes line breaks and writes 4-tuples into `outBuffer`. Returns the number of
 
 **Returns** -- `number` of lines written.
 
+When `outBuffer` is too small, the last written line's flags slot is set to `FLAG_OVERFLOW` (iff `countLines(...) > floor(outBuffer.length / 4)`); the partial layout is a true prefix of the unbounded result. A zero-capacity buffer (length 0..3, no whole 4-slot stride) returns `0` and writes nothing -- detect a swallowed non-empty layout as `n === 0 && text.length > 0`. `FLAG_OVERFLOW` and `FLAG_TRUNCATED` are mutually exclusive in one call.
+
+### `TextLayout.countLines(text, font, boxWidth, boxHeight, lineHeight, scale?) -> number`
+
+Counts the lines `computeWrap` would write into an unbounded buffer -- same parameters, same order, minus `outBuffer`. Size a buffer that can never overflow as `new Float32Array(countLines(...) * 4)`. Agrees with `computeWrap` on every wrapping and truncating call.
+
 ### Constants
 
 | Constant         | Value | Meaning                                                    |
 |------------------|-------|------------------------------------------------------------|
 | `FLAG_NORMAL`    | `0`   | Normal line.                                               |
-| `FLAG_TRUNCATED` | `1`   | The renderer should append `...` after this line's content.  |
+| `FLAG_TRUNCATED` | `1`   | The TEXT did not fit the BOX; the renderer appends `...`.  |
+| `FLAG_OVERFLOW`  | `2`   | The BUFFER did not fit the TEXT (a caller bug); set on the last written line. |
+
+**Law 6 -- flags are a value space; compare by equality, never by truthiness.** `if (flags === FLAG_TRUNCATED)`, never `if (flags)`. The domain may widen in a MINOR release; only equality against a named constant is stable across that widening. See `decisions/0001-flag-overflow.md`.
 
 ## Output Buffer Format
 
@@ -109,7 +118,7 @@ Each line is **4 consecutive Float32 values**:
 | `[0]`| `startIdx`   | Char index in `text` where this line begins (inclusive).          |
 | `[1]`| `endIdx`     | Char index in `text` where this line ends (exclusive).            |
 | `[2]`| `lineWidth`  | Measured pixel width of this line, including any ellipsis allowance. |
-| `[3]`| `flags`      | `FLAG_NORMAL` (0) or `FLAG_TRUNCATED` (1).                        |
+| `[3]`| `flags`      | `FLAG_NORMAL` (0), `FLAG_TRUNCATED` (1), or `FLAG_OVERFLOW` (2).  |
 
 The buffer must hold at least `lineCount * 4` floats. Surplus capacity is ignored, so one fat buffer can be reused across many strings.
 
@@ -157,9 +166,11 @@ Characters with `id >= 256` contribute zero advance and reset the kerning contex
 ```typescript
 export const FLAG_NORMAL: 0;
 export const FLAG_TRUNCATED: 1;
-export const VERSION: '1.0.2';
+export const FLAG_OVERFLOW: 2;
+export const VERSION: '1.1.0';
 
-export type LineFlag = typeof FLAG_NORMAL | typeof FLAG_TRUNCATED;
+// Law 6 -- flags are a value space; compare by equality, never by truthiness.
+export type LineFlag = typeof FLAG_NORMAL | typeof FLAG_TRUNCATED | typeof FLAG_OVERFLOW;
 
 export interface BitmapFontData {
     glyphs: Int16Array;
@@ -181,6 +192,14 @@ export const TextLayout: {
         boxHeight: number,
         lineHeight: number,
         outBuffer: Float32Array,
+        scale?: number
+    ): number;
+    countLines(
+        text: string,
+        font: BitmapFontData,
+        boxWidth: number,
+        boxHeight: number,
+        lineHeight: number,
         scale?: number
     ): number;
 };
@@ -226,6 +245,10 @@ const isPossiblyClipped = lineCount === layout.length / 4;
 Follows semver. Patch releases for bug fixes, minor for new features, major for breaking changes.
 
 ## Changelog
+
+### 1.1.0
+
+- Added `FLAG_OVERFLOW = 2`: an undersized `outBuffer` now marks the flags slot of its last written line, so a truncated layout is distinguishable from a genuine short one (was silent, fail-open). Added `countLines(text, font, boxWidth, boxHeight, lineHeight, scale?)` to size a buffer that can never overflow. Froze the `TextLayout` namespace. Zero-capacity buffers (length 0..3) return `0` and write nothing. `FLAG_OVERFLOW` and `FLAG_TRUNCATED` are mutually exclusive in one call. Law 6: compare flags by equality, never by truthiness. MINOR -- see `decisions/0001-flag-overflow.md`.
 
 ### 1.0.2
 

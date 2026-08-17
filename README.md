@@ -1,6 +1,8 @@
 # @zakkster/lite-text-layout
 
 [![npm version](https://img.shields.io/npm/v/@zakkster/lite-text-layout.svg?style=for-the-badge&color=latest)](https://www.npmjs.com/package/@zakkster/lite-text-layout)
+![Zero-GC](https://img.shields.io/badge/Zero--GC-Hot%20path-00C853?style=for-the-badge&logo=leaf&logoColor=white)
+[![sponsor](https://img.shields.io/badge/sponsor-PeshoVurtoleta-ea4aaa.svg?logo=github)](https://github.com/sponsors/PeshoVurtoleta)
 [![npm bundle size](https://img.shields.io/bundlephobia/minzip/@zakkster/lite-text-layout?style=for-the-badge)](https://bundlephobia.com/result?p=@zakkster/lite-text-layout)
 [![npm downloads](https://img.shields.io/npm/dm/@zakkster/lite-text-layout?style=for-the-badge&color=blue)](https://www.npmjs.com/package/@zakkster/lite-text-layout)
 [![npm total downloads](https://img.shields.io/npm/dt/@zakkster/lite-ext-layout?style=for-the-badge&color=blue)](https://www.npmjs.com/package/@zakkster/lite-ext-layout)
@@ -95,11 +97,14 @@ Each line is **4 consecutive Float32 values**:
 | `[0]` | `startIdx` -- char index in `text` where this line begins (inclusive) |
 | `[1]` | `endIdx` -- char index in `text` where this line ends (exclusive) |
 | `[2]` | `lineWidth` -- measured pixel width of this line, including any ellipsis allowance |
-| `[3]` | `flags` -- `FLAG_NORMAL` (0) or `FLAG_TRUNCATED` (1, append `...`) |
+| `[3]` | `flags` -- `FLAG_NORMAL` (0), `FLAG_TRUNCATED` (1, append `...`), or `FLAG_OVERFLOW` (2) |
 
 The buffer must hold at least `lineCount * 4` floats; surplus capacity is ignored, so you
 can reuse one fat buffer across many strings. The function returns the number of lines
-actually written.
+actually written. If the buffer is too small, the last written line's flags slot is set to
+`FLAG_OVERFLOW` and the partial layout is a true prefix of the full result; a zero-capacity
+buffer (length 0..3) returns `0` and writes nothing. Use `countLines` to size a buffer that
+can never overflow.
 
 ```javascript
 import { FLAG_TRUNCATED } from '@zakkster/lite-text-layout';
@@ -148,13 +153,28 @@ Computes the layout. Writes 4-tuples into `outBuffer` and returns the line count
 - `boxWidth` -- px, `0` for no horizontal limit
 - `boxHeight` -- px, `0` for no vertical limit
 - `lineHeight` -- px at `scale=1`, usually `font.lineHeight`
-- `outBuffer` -- pre-allocated `Float32Array`, capacity caps line count at `floor(length / 4)`
+- `outBuffer` -- pre-allocated `Float32Array`, capacity caps line count at `floor(length / 4)`; an undersized buffer flags its last written line `FLAG_OVERFLOW`
 - `scale` -- applied to all widths and the height-fit check (default `1`)
+
+### `countLines(text, font, boxWidth, boxHeight, lineHeight, scale?) -> number`
+
+Counts the lines `computeWrap` would write into an unbounded buffer -- same parameters,
+same order, minus `outBuffer`. Size a buffer that can never overflow as
+`new Float32Array(countLines(...) * 4)`. Agrees with `computeWrap` on every wrapping and
+truncating call.
 
 ### Constants
 
-- `FLAG_NORMAL = 0` -- normal line
-- `FLAG_TRUNCATED = 1` -- renderer should append `...`
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `FLAG_NORMAL` | `0` | Normal line |
+| `FLAG_TRUNCATED` | `1` | The TEXT did not fit the BOX; renderer appends `...` |
+| `FLAG_OVERFLOW` | `2` | The BUFFER did not fit the TEXT (a caller bug); set on the last written line |
+
+**Law 6 -- flags are a value space; compare by equality, never by truthiness.**
+`if (flags === FLAG_TRUNCATED)`, never `if (flags)`. The domain may widen in a MINOR
+release; only equality against a named constant is stable. See
+`decisions/0001-flag-overflow.md`.
 
 ## Benchmark
 
@@ -172,8 +192,8 @@ Re-rendering an already-laid-out paragraph at 60 fps:
 
 Full TypeScript declarations included in `TextLayout.d.ts`. Exports:
 
-- `TextLayout.computeWrap(...)`
-- `FLAG_NORMAL`, `FLAG_TRUNCATED`
+- `TextLayout.computeWrap(...)`, `TextLayout.countLines(...)`
+- `FLAG_NORMAL`, `FLAG_TRUNCATED`, `FLAG_OVERFLOW`
 - Types: `BitmapFontData`, `LayoutLine`, `LineFlag`
 
 ## LLM-Friendly Documentation
@@ -181,6 +201,9 @@ Full TypeScript declarations included in `TextLayout.d.ts`. Exports:
 See `llms.txt` for AI-optimized metadata and usage examples.
 
 ## Changelog
+
+### 1.1.0
+- Added `FLAG_OVERFLOW = 2` (an undersized buffer now reports itself on the last written line's flags slot), `countLines` for overflow-proof buffer sizing, and a frozen `TextLayout` namespace. Zero-capacity buffers return `0` and write nothing; `FLAG_OVERFLOW` and `FLAG_TRUNCATED` are mutually exclusive. Law 6: compare flags by equality, never by truthiness. MINOR -- see `decisions/0001-flag-overflow.md`.
 
 ### 1.0.0
 - Initial release. `computeWrap` with soft-break, hard-break, explicit-newline, truncation with ellipsis flag, and full kerning support.

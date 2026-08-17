@@ -57,6 +57,10 @@ export function run() {
     for (let i = 0; i < CYCLES; i++) {
         const idx = i & (POOL - 1);
         const nLines = TextLayout.computeWrap(texts[idx], FONT, BOXW, 0, 16, out, 1);
+        // countLines in the cycle too (TL1) -- it takes no buffer and allocates
+        // nothing, so it belongs inside the measured churn and must agree with the
+        // pooled expectation exactly.
+        const cLines = TextLayout.countLines(texts[idx], FONT, BOXW, 0, 16, 1);
         // Per-cycle churn object. NOOP does not close over it; the tag is a
         // constant primitive -- neither captures the target.
         const obj = { cycle: i };
@@ -64,6 +68,8 @@ export function run() {
         tracker.untrack(handle);
         check(nLines === expected[idx],
             () => 'T7: cycle ' + i + ' text ' + idx + ' lines ' + nLines + ' != ' + expected[idx]);
+        check(cLines === expected[idx],
+            () => 'T7: cycle ' + i + ' text ' + idx + ' countLines ' + cLines + ' != ' + expected[idx]);
 
         if ((i & 511) === 511) {
             globalThis.gc();

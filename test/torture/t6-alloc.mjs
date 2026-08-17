@@ -15,8 +15,11 @@
  * that proves the gate bites. Reaching the end of T6 with BREAK set is itself a
  * die().
  *
- * Lane 2 (countLines) arrives in TL1 and lane 3 (doors on valid input) in TL2;
- * each is registered as a todo below so the obligation is visible now.
+ * Lane 2 (countLines) arrives in TL1: the same zero-alloc discipline over
+ * TextLayout.countLines, measured strictly AFTER lane 1 (never nested). A SINK
+ * accumulator defeats dead-code elimination -- V8 may drop a call whose result is
+ * discarded, and a dropped call passes as zero-alloc for the wrong reason. Lane 3
+ * (doors on valid input) arrives in TL2 and stays a todo below.
  */
 
 import { TextLayout } from '../../TextLayout.js';
@@ -41,8 +44,10 @@ const leak = [];
 /** Reused output buffer, allocated ONCE. The hot body writes into it in place. */
 const out = new Float32Array(256);
 
+/** Lane 2 sink -- a number store, not an allocation. Defeats DCE of countLines. */
+let SINK = 0;
+
 export function run() {
-    todo('T6-lane2', 'countLines zero-alloc gate -- lands in TL1');
     todo('T6-lane3', 'doors-on-valid-input zero-alloc gate -- lands in TL2');
 
     const hot = () => {
@@ -78,5 +83,30 @@ export function run() {
     if (allocReport.verdict !== 'pass') {
         die('T6 alloc gate rejected -- verdict=' + allocReport.verdict +
             ' bytesPerCall=' + allocs.bytesPerCall + ' settled=' + allocs.settled);
+    }
+
+    // -- Lane 2 (TL1): countLines, same zero-alloc discipline. Strictly AFTER
+    // lane 1 -- the profiler measures one window at a time, never nested. countLines
+    // takes no buffer, so there is nothing to reuse; the gate proves the linear
+    // pass allocates nothing on its own. SINK accumulates the return value so a
+    // dead-code-eliminated call cannot pass as a zero-alloc call.
+    const hot2 = () => {
+        SINK += TextLayout.countLines(TL20_TEXT, FONT, 200, 0, 16);
+        if (BREAK) leak.push(new Float64Array(64));
+    };
+
+    const { report: r2, summary: s2 } = runOpsGate(hot2, { ops: OPS, warmup: WARMUP });
+    const { report: a2, allocs: allocs2 } = runAllocGate(hot2, { iterations: ITERATIONS });
+
+    check(SINK > 0, () => 'T6 lane2: SINK is 0 -- the countLines call was optimised away');
+
+    if (!r2.ok) {
+        const g = s2.gc;
+        die('T6 lane2 ops gate rejected -- verdict=' + r2.verdict + ' source=' + s2.source +
+            ' major=' + g.major + ' minor=' + g.minor + ' maxMs=' + g.maxMs.toFixed(3));
+    }
+    if (a2.verdict !== 'pass') {
+        die('T6 lane2 alloc gate rejected -- verdict=' + a2.verdict +
+            ' bytesPerCall=' + allocs2.bytesPerCall + ' settled=' + allocs2.settled);
     }
 }

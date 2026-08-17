@@ -24,6 +24,7 @@ import {
     checkNoGc,
     checkAllocs,
 } from '@zakkster/lite-gc-profiler';
+import { TextLayout, FLAG_OVERFLOW } from '../../TextLayout.js';
 
 /** Seed for every PRNG in the run. Override with TORTURE_SEED for replay. */
 export const SEED = (() => {
@@ -197,6 +198,44 @@ export function makeCorpus(prng, n) {
         out[c] = { text: parts.join(''), boxWidth, scale };
     }
     return out;
+}
+
+// --- the countLines agreement comparator -----------------------------------
+
+/** Unbounded buffer for agreeCount. Big enough that no corpus case caps here. */
+const AGREE_OUT = new Float32Array(4 * 1024);
+
+/**
+ * The ONE comparator both the T0 agreement law (law 9) and T9 control 3 run, so
+ * control 3 cannot accidentally test a different, weaker comparison. For each
+ * case it compares `fnCount(...)` against `computeWrap(..., AGREE_OUT, ...)` and
+ * counts mismatches. It fails closed on vacuity: if the computeWrap side ever
+ * carries FLAG_OVERFLOW, AGREE_OUT was too small and the comparison proved
+ * nothing, so it die()s rather than returning a meaningless 0.
+ *
+ * `cs` is an array of `{ text, boxWidth, boxHeight, lineHeight, scale }`;
+ * boxHeight defaults to 0 and lineHeight to 16 when omitted.
+ *
+ * @param {(text:string, font:object, bw:number, bh:number, lh:number, s:number)=>number} fnCount
+ * @param {Array<{text:string, boxWidth:number, boxHeight?:number, lineHeight?:number, scale:number}>} cs
+ * @returns {number} number of cases where fnCount disagreed with computeWrap
+ */
+export function agreeCount(fnCount, cs) {
+    let mism = 0;
+    for (let i = 0; i < cs.length; i++) {
+        const c = cs[i];
+        const bh = c.boxHeight === undefined ? 0 : c.boxHeight;
+        const lh = c.lineHeight === undefined ? 16 : c.lineHeight;
+        const cw = TextLayout.computeWrap(c.text, FONT, c.boxWidth, bh, lh, AGREE_OUT, c.scale);
+        for (let k = 0; k < cw; k++) {
+            if (AGREE_OUT[k * 4 + 3] === FLAG_OVERFLOW) {
+                die('agreeCount: OUT_BIG too small, the agreement law is not measuring anything');
+            }
+        }
+        const cl = fnCount(c.text, FONT, c.boxWidth, bh, lh, c.scale);
+        if (cl !== cw) mism++;
+    }
+    return mism;
 }
 
 // --- gate wrappers ---------------------------------------------------------
