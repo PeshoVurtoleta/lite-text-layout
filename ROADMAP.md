@@ -17,7 +17,7 @@ TL-26 was found by the TL0 torture suite itself.
 | Area | State | What it needs |
 | --- | --- | --- |
 | **Hot body** | One linear pass, 0 bytes/op at 20,000 ops, `verdict: pass`, major 0, minor 0, maxMs 0.000 | **Nothing.** Lock it behind a gate that can fail. Do not invent allocation work. |
-| **Correctness** | Buffer overflow is fail-OPEN and indistinguishable from a short layout; NaN scale, NaN boxWidth, `lineHeight <= 0` and a short glyph table each silently disable a documented rule | The two behaviour sessions, TL1 and TL2 |
+| **Correctness** | Buffer overflow now fails CLOSED (`FLAG_OVERFLOW`, `countLines`, shipped 1.1.0); NaN scale, NaN boxWidth, `lineHeight <= 0` and a short glyph table each still silently disable a documented rule | TL1 done; TL2 is the remaining behaviour session |
 | **Harness** | `vitest run`, test file in the package root, no `test/`, no torture gate, no CHANGELOG, no `VERSION`, `npx esbuild` in `prepublishOnly` | TL0, first, before any behaviour change |
 | **Docs** | Three version numbers disagree, README is not on the suite blueprint, 126 non-ASCII lines across five shipped files | TL4, last, after the surface stops moving |
 | **Cross-package** | The bmfont contract is stated nowhere executable, and `drawWrapped` re-scales a width this package already scaled (TL-25) | TL3 now, TL5 when bmfont ships |
@@ -581,7 +581,7 @@ DONE WHEN
 ---
 package: "@zakkster/lite-text-layout"
 version_target: 1.1.0
-status: planned
+status: shipped
 gc_maxMajor: 0
 gc_maxPauseMs: 4
 alloc_bytes_per_op: 0
@@ -721,7 +721,7 @@ gc_maxPauseMs: 4
 alloc_bytes_per_op: 0
 leak_cycles: 4096
 peers: ["@zakkster/lite-gc-profiler", "@zakkster/lite-leak"]
-findings: [TL-03, TL-04, TL-05, TL-06, TL-07, TL-08, TL-09, TL-10, TL-13, TL-14, TL-23, TL-24, TL-26]
+findings: [TL-03, TL-04, TL-05, TL-06, TL-07, TL-08, TL-09, TL-10, TL-12, TL-13, TL-14, TL-15, TL-23, TL-24, TL-26]
 depends_on: [TL1]
 blocks: [TL3]
 ---
@@ -799,6 +799,19 @@ TASKS
   - TL-23: reset `lastSpaceWidth` alongside every `lastSpace = -1`, or hoist
     both into one small reset. It is not a live bug; it is several places that
     must stay in sync, and the T5 fuzz is what proves they do.
+  - **TL-15 -- assigned here as of this revision.** It was a live known-failing
+    gate entry that no session's `findings:` list owned; TL2 is the right home
+    because a `text.length` ceiling is an input-domain fact and this is the
+    input-door session. `startIdx`/`endIdx` are Float32 and exact only to 2^24,
+    so a text longer than 16,777,216 characters reports indices that do not
+    round-trip. Policy B, and the recommendation is DOCUMENT the ceiling rather
+    than throw: the check is one `text.length` read at the door, but a throw
+    turns a 16 MB string -- legal input that lays out correctly for every index
+    below the ceiling -- into a hard failure. Pin the two round-trip facts by
+    name (`f32(16777217) === 16777216`, `f32(16777219) === 16777220`) and state
+    the ceiling in all four documentation surfaces. If the decision file argues
+    for a throw instead, that is acceptable; what is not acceptable is leaving
+    it unowned for a third session.
   - **Inherited from TL1's QA: add the missing T5 flag tripwire.** Two universal
     claims hold today but have no standalone instrument -- every flags slot is in
     `{0, 1, 2}`, and no single output ever carries both a `FLAG_TRUNCATED` and a
@@ -853,6 +866,8 @@ ASSERTIONS
     is outside the range, and the widths are unchanged.
   - `'   AAA'` still yields `[0,6]` width 54, with a test named for the fact
     that this is DELIBERATE (indentation is preserved) so nobody "fixes" it.
+  - TL-15's two round-trip facts are pinned by name and the 2^24 ceiling
+    appears in d.ts, llms.txt, README and the source docstring.
   - Scale invariance holds across the whole T5 corpus.
   - T6: 0 bytes/op, within noise of the TL-20 baseline, on all three lanes.
   - torture "ok"; T9 control 6 exits non-zero.
@@ -951,6 +966,50 @@ TASKS
     Sessions 1 and 2 and are NOT shipped. `_measureRange` exists and is
     private; the suite does not call it. Do not plan against an API that does
     not exist.
+
+INHERITED FROM TL2 (all four came out of TL2's reviewer and QA)
+
+  - **BLOCKING, and it must land before any further edit to the `id === 10`
+    branch: `makeCorpus` emits no `\r`.** Measured in TL2's QA: 250,000
+    generated cases across 5 seeds, 42,635,887 characters, **zero** containing
+    a CR. `oracle.mjs` has no CR handling at all, so `divergences=0` over
+    50,000 cases says NOTHING about CRLF. The entire CRLF contract rests on 42
+    hand-built (config x boxHeight) combinations in `t1-degenerate.mjs`.
+
+    This is not hypothetical tidiness -- it is the hole that hid TL2's only
+    blocker. TL2 shipped `crlfInRange`, a CORRECT detector, and pointed it at
+    the non-truncating arm only; the truncating arm, which has entirely
+    different width arithmetic (`safeW` versus `cursorX - crAdv`), carried the
+    CR inside the emitted range on every truncating CRLF layout and the gate
+    stayed green. A 42-point grid catches only what its author imagined. The
+    oracle is the sole instrument in the suite that is independent of the
+    subject, and CRLF currently has zero differential coverage.
+
+    The fix is small and bounded: emit `\r\n` in place of some fraction of
+    `makeCorpus`'s `\n`, add one condition to `oracle.mjs`, and 50,000 cases of
+    search come free. Do it FIRST in TL3, before touching anything else.
+
+  - `crlfInRange` (`harness.mjs:375`) reads `charCodeAt(j + 1)` at `j === e - 1`
+    -- one past the range end. This is CORRECT and LOAD-BEARING: `charCodeAt`
+    past the end returns NaN, `NaN !== 10`, so the last-character case cannot
+    false-positive, and the bug it hunts is exactly a CR sitting AT the range
+    end with its LF just outside. Narrowing the scan to `j + 1 < e` would blind
+    the detector to the precise TL-13 signature and the whole 42-point sweep
+    would pass vacuously. It is undocumented. **Add the comment** -- an
+    apparent off-by-one with no explanation is one tidy-up away from silently
+    converting the CRLF suite into a no-op.
+
+  - `RULES` gates `maxMajor`, `maxPauseMs` and `maxArrayBuffersGrowth` but NOT
+    `minor` or `source`. TL2's assertion 17 asserts `minor === 0` and
+    `source === 'gc'`, and QA measured both by hand on all three lanes -- but
+    the gate would not notice if either moved. Add `maxMinor` and pin `source`.
+
+  - Adopt `briefs/TL3-boundary-tests.mjs` into `test/`. TL2's QA wrote 12
+    boundary cases covering contract corners that were asserted in prose but
+    not executable; they pass against 1.2.0 and were deliberately kept out of
+    the shipped tree so as not to break TL2's verified freeze. `node:test`
+    only, no imports outside the package. Moving them in raises `npm test`
+    from 54 to 66.
 
 HOT PATH
   No code in TextLayout.js changes under recommendation A. The diff is

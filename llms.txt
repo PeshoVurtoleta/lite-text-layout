@@ -5,7 +5,7 @@ Zero-GC word wrapper for ASCII bitmap fonts. Computes line breaks, kerning-aware
 ## Key Facts
 
 - **Package**: `@zakkster/lite-text-layout`
-- **Version**: 1.1.0
+- **Version**: 1.2.0
 - **Bundle**: ~1.1 KB minified, ~0.6 KB gzipped
 - **Dependencies**: 0
 - **License**: MIT
@@ -99,6 +99,36 @@ When `outBuffer` is too small, the last written line's flags slot is set to `FLA
 
 Counts the lines `computeWrap` would write into an unbounded buffer -- same parameters, same order, minus `outBuffer`. Size a buffer that can never overflow as `new Float32Array(countLines(...) * 4)`. Agrees with `computeWrap` on every wrapping and truncating call.
 
+### `TextLayoutError`
+
+```javascript
+import { TextLayoutError } from '@zakkster/lite-text-layout';
+```
+
+`class TextLayoutError extends Error`, `name === 'TextLayoutError'`. Thrown by BOTH entry points, through ONE shared validator, as the first statement of each -- before the loop, never from inside it. The message names the argument, what it received and what is required.
+
+**The input door (1.2.0).** `NaN` is not infinity and `null` is not zero. Before 1.2.0 none of these threw: `boxWidth = NaN` silently meant "no horizontal limit", `scale = NaN` silently disabled wrapping entirely, a 700-entry glyph table silently made every width `NaN`, and `text = 12345` silently returned `0`.
+
+| Argument | Requirement | Message names |
+|---|---|---|
+| `text` | a string | `text`, `string` |
+| `font` | an object with both tables | `font` |
+| `font.glyphs` | length >= 1792 (256 x 7) | `font.glyphs`, received, required |
+| `font.kerning` | length >= 65536 (256 x 256) | `font.kerning`, received, required |
+| `boxWidth` | finite and >= 0 (`0` = no limit) | `boxWidth`, `finite` / `negative` |
+| `boxHeight` | finite and >= 0 (`0` = no limit) | `boxHeight`, `finite` / `negative` |
+| `lineHeight` | finite always; `> 0` when `boxHeight > 0` | `lineHeight`, `finite` / `> 0` |
+| `scale` | finite and `> 0` | `scale`, `finite` / `> 0` |
+| `outBuffer` | a `Float32Array` (`computeWrap` only) | `outBuffer`, `Float32Array` |
+
+Checks run in that exact order, so a tuple wrong in two places always reports the same argument.
+
+**`lineHeight` is conditional on purpose.** `computeWrap('AAA', font, 0, 0, 0, out)` does NOT throw: with no vertical box the value is never read. `computeWrap('AAA', font, 0, 32, 0, out)` throws naming `lineHeight`.
+
+**Cross-realm caveat.** The `outBuffer` check is `instanceof Float32Array`, so a `Float32Array` from another realm (a `vm` context, an iframe) is REJECTED. Deliberate: the alternative is a duck-type check that accepts any object naming itself `Float32Array`. Copy into a same-realm view.
+
+**Aliasing.** `outBuffer` overlapping `font.glyphs` through a shared `ArrayBuffer` is caller error with an undefined result, and is NOT checked at runtime -- a `.buffer` identity check would reject a caller who packs DISJOINT views into one arena, which is correct code.
+
 ### Constants
 
 | Constant         | Value | Meaning                                                    |
@@ -133,15 +163,22 @@ const flags     = layout[o + 3];
 
 ## Wrapping Rules
 
-- **Soft-break** at the last space (` `, code 32) when adding the next glyph would exceed `boxWidth`. The breaking space is excluded from both sides; runs of leading whitespace on the next line are skipped (no whitespace-only lines).
+- **Soft-break** at the last space (` `, code 32) when adding the next glyph would exceed `boxWidth`. The breaking space is excluded from both sides; runs of leading whitespace on the next line are skipped **after a soft break**.
+- **Leading whitespace is CONTENT** at the start of the text and immediately after an explicit `\n` -- it is skipped only after a soft break. `computeWrap('   ', ...)` is one line of width `3 * space`, not an empty layout. Indentation is never silently destroyed; call `trim()` yourself if you want it gone. Deliberate, see `decisions/0002-input-door.md`.
 - **Hard-break** mid-word when no space is available within the current line. Kerning is reset across the break -- the first glyph of the new line gets a fresh kerning context.
+- **An over-wide glyph is emitted, unflagged.** A single glyph wider than `boxWidth` produces a line wider than the box. "At least one glyph per line" is what makes the loop terminate; an over-wide line is the price of that guarantee.
 - **Explicit `\n`** (code 10) starts a new line and is not rendered.
-- **`boxWidth === 0`** disables horizontal wrapping (only `\n` and truncation apply).
+- **CRLF**: a `\r` (code 13) **immediately preceding** a `\n` is a line terminator and is EXCLUDED from the emitted range, so the range and `lineWidth` agree. `'AAA\r\nBBB'` and `'AAA\nBBB'` give the same line count and the same widths. A **lone `\r`** is not a terminator: it stays inside the range and contributes its atlas advance (0 in a normal font). Mac-Classic line endings are unsupported by design. The LF-identity holds whenever the CR's own advance does not force a wrap, which is always the case for a real bitmap atlas (a CR is not a printable glyph, so its advance is 0). A hand-rolled atlas that gives glyph 13 a non-zero advance, in a `boxWidth` narrow enough for it to matter, wraps the CR onto its own line before the terminator rule is reached -- out of contract, and the CR is still never inside an emitted range.
+- **`boxWidth === 0`** disables horizontal wrapping (only `\n` and truncation apply). `0` is the documented way to say "no limit"; a negative or non-finite `boxWidth` now throws.
 - **`boxHeight === 0`** disables vertical truncation (`FLAG_TRUNCATED` is never written).
+- **`boxHeight > 0` with `lineHeight * scale > boxHeight` returns `0` and writes nothing.** A box that cannot hold one line holds no lines. The boundary is `>`, not `>=`: a box exactly one line tall still emits its line.
+- **Index ceiling**: `startIdx` and `endIdx` are Float32 slots, exact only to 2^24 = 16777216. A text longer than 16777216 characters lays out correctly below that index and reports wrong indices above it -- out of domain, documented rather than policed.
 
 ## Truncation Rules
 
 When `boxHeight > 0` and the wrap point would push content past the bottom of the box, the last fitting line is flagged `FLAG_TRUNCATED`. The renderer appends `...` (three ASCII `.` glyphs) -- no per-frame string allocation.
+
+**A truncated line's `lineWidth` INCLUDES the ellipsis allowance.** For content 36 plus an 18px ellipsis the slot reads `54`, not `36`. A consumer summing widths for centring must expect a `FLAG_TRUNCATED` line to measure wider than the glyphs in `[startIdx, endIdx)`.
 
 The layout tracks the latest position on each line where *content + ellipsis* still fits within `boxWidth`. The truncated line ends there, so `...` always stays inside the box.
 
@@ -167,7 +204,7 @@ Characters with `id >= 256` contribute zero advance and reset the kerning contex
 export const FLAG_NORMAL: 0;
 export const FLAG_TRUNCATED: 1;
 export const FLAG_OVERFLOW: 2;
-export const VERSION: '1.1.0';
+export const VERSION: '1.2.0';
 
 // Law 6 -- flags are a value space; compare by equality, never by truthiness.
 export type LineFlag = typeof FLAG_NORMAL | typeof FLAG_TRUNCATED | typeof FLAG_OVERFLOW;
@@ -245,6 +282,10 @@ const isPossiblyClipped = lineCount === layout.length / 4;
 Follows semver. Patch releases for bug fixes, minor for new features, major for breaking changes.
 
 ## Changelog
+
+### 1.2.0
+
+- Added `TextLayoutError` and the input door: both entry points validate every argument once, at entry, through one shared validator, and throw an error naming the argument and the requirement. Previously `boxWidth = NaN`, `boxWidth = -100`, `scale = NaN`, `scale = 0`, a short `font.glyphs`, a non-string `text` and a non-`Float32Array` `outBuffer` were all accepted and silently produced NaN widths, no wrapping, or a silent `0`. Fixed: a `\r` immediately before a `\n` is excluded from the emitted range (CRLF now lays out identically to LF); the phantom zero-width line emitted when trailing whitespace soft-breaks immediately before a `\n` is gone, while a deliberate blank line survives. Defined: `boxHeight > 0` with `lineHeight * scale > boxHeight` returns `0` and writes nothing. Documented: leading whitespace is skipped only after a soft break, an over-wide glyph is emitted unflagged, a truncated line's width includes the ellipsis allowance, and indices are exact to 2^24 = 16777216. MINOR -- new export plus new throws on input that was previously accepted and silently wrong. See `decisions/0002-input-door.md`.
 
 ### 1.1.0
 

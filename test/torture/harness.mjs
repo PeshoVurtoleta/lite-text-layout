@@ -24,7 +24,13 @@ import {
     checkNoGc,
     checkAllocs,
 } from '@zakkster/lite-gc-profiler';
-import { TextLayout, FLAG_OVERFLOW } from '../../TextLayout.js';
+import {
+    TextLayout,
+    TextLayoutError,
+    FLAG_NORMAL,
+    FLAG_TRUNCATED,
+    FLAG_OVERFLOW,
+} from '../../TextLayout.js';
 
 /** Seed for every PRNG in the run. Override with TORTURE_SEED for replay. */
 export const SEED = (() => {
@@ -198,6 +204,216 @@ export function makeCorpus(prng, n) {
         out[c] = { text: parts.join(''), boxWidth, scale };
     }
     return out;
+}
+
+// --- the input-door matrix (TL2) -------------------------------------------
+
+/**
+ * The two KNOWN-GOOD tuples every door row varies exactly one argument from.
+ * AR-02: a door test that does not first prove its base tuple is accepted can
+ * pass for the wrong reason (a row that is wrong in two places throws about the
+ * other one). `doorMisses` asserts both bases return a line count and do NOT
+ * throw before it tests a single rejection.
+ *
+ * BASE_A has boxHeight 0, so `lineHeight <= 0` is legal there.
+ * BASE_B has boxHeight 32 with lineHeight 16 (16 * 1 <= 32, so no zero-line
+ * early exit), which is the only regime in which `lineHeight <= 0` is rejected.
+ */
+export const DOOR_BASE_A = { text: 'AAA BBB', bw: 100, bh: 0, lh: 16, scale: 1 };
+export const DOOR_BASE_B = { text: 'AAA BBB', bw: 100, bh: 32, lh: 16, scale: 1 };
+
+const SHORT_GLYPHS = new Int16Array(700);
+const TINY_GLYPHS = new Int16Array(4);
+const SHORT_KERNING = new Int16Array(4);
+const FONT_SHORT_GLYPHS = { glyphs: SHORT_GLYPHS, kerning: FONT_KERNING };
+const FONT_TINY_GLYPHS = { glyphs: TINY_GLYPHS, kerning: FONT_KERNING };
+const FONT_SHORT_KERNING = { glyphs: FONT_GLYPHS, kerning: SHORT_KERNING };
+
+/**
+ * Every door rejection, one row per value, each varying EXACTLY ONE argument
+ * from its named base tuple. `needs` lists substrings the message must contain
+ * -- the argument name plus the requirement, so a row cannot pass on a message
+ * about a different argument.
+ *
+ * Built ONCE at module load. Never touched inside a measured window.
+ */
+export const DOOR_ROWS = [
+    // TL-09 -- text (4 rows)
+    { id: 'TL-09', base: 'A', arg: 'text', value: 12345, needs: ['text', 'string'] },
+    { id: 'TL-09', base: 'A', arg: 'text', value: null, needs: ['text', 'string'] },
+    { id: 'TL-09', base: 'A', arg: 'text', value: undefined, needs: ['text', 'string'] },
+    { id: 'TL-09', base: 'A', arg: 'text', value: ['A'], needs: ['text', 'string'] },
+    // TL-09 -- font (3 rows)
+    { id: 'TL-09', base: 'A', arg: 'font', value: {}, needs: ['font.glyphs'] },
+    { id: 'TL-09', base: 'A', arg: 'font', value: null, needs: ['font'] },
+    { id: 'TL-09', base: 'A', arg: 'font', value: undefined, needs: ['font'] },
+    // TL-08 -- short tables (3 rows)
+    { id: 'TL-08', base: 'A', arg: 'font', value: FONT_SHORT_GLYPHS, needs: ['font.glyphs', '700', '1792'] },
+    { id: 'TL-08', base: 'A', arg: 'font', value: FONT_TINY_GLYPHS, needs: ['font.glyphs', '4', '1792'] },
+    { id: 'TL-08', base: 'A', arg: 'font', value: FONT_SHORT_KERNING, needs: ['font.kerning', '4', '65536'] },
+    // TL-05 -- boxWidth (4 rows)
+    { id: 'TL-05', base: 'A', arg: 'bw', value: -1, needs: ['boxWidth', 'negative'] },
+    { id: 'TL-05', base: 'A', arg: 'bw', value: -100, needs: ['boxWidth', 'negative'] },
+    { id: 'TL-05', base: 'A', arg: 'bw', value: NaN, needs: ['boxWidth', 'finite'] },
+    { id: 'TL-05', base: 'A', arg: 'bw', value: -Infinity, needs: ['boxWidth', 'finite'] },
+    // boxHeight (2 rows) -- same family as TL-05, the vertical axis
+    { id: 'TL-05', base: 'A', arg: 'bh', value: NaN, needs: ['boxHeight', 'finite'] },
+    { id: 'TL-05', base: 'A', arg: 'bh', value: -1, needs: ['boxHeight', 'negative'] },
+    // TL-06 -- lineHeight (3 rows). NaN throws from EITHER base; 0 and -16 only
+    // from base B, where boxHeight > 0 makes the value load-bearing.
+    { id: 'TL-06', base: 'A', arg: 'lh', value: NaN, needs: ['lineHeight', 'finite'] },
+    { id: 'TL-06', base: 'B', arg: 'lh', value: 0, needs: ['lineHeight', '> 0'] },
+    { id: 'TL-06', base: 'B', arg: 'lh', value: -16, needs: ['lineHeight', '> 0'] },
+    // TL-03 / TL-04 -- scale (4 rows)
+    { id: 'TL-03', base: 'A', arg: 'scale', value: NaN, needs: ['scale', 'finite'] },
+    { id: 'TL-03', base: 'A', arg: 'scale', value: Infinity, needs: ['scale', 'finite'] },
+    { id: 'TL-04', base: 'A', arg: 'scale', value: 0, needs: ['scale', '> 0'] },
+    { id: 'TL-04', base: 'A', arg: 'scale', value: -1, needs: ['scale', '> 0'] },
+];
+
+/**
+ * Run every DOOR_ROWS row through `call` and count the MISSES -- rows that did
+ * not throw a `TextLayoutError` whose message contains every `needs` substring.
+ *
+ * `call(text, font, bw, bh, lh, scale)` performs one layout attempt; the caller
+ * closes over its own buffer (or has none, for `countLines`). This is the ONE
+ * door detector: T1 runs it against the real entry points requiring 0, and T9
+ * controls 9 and 10 run it against deliberately doorless stubs requiring more
+ * than 0. Neither can drift to a weaker predicate than the other.
+ *
+ * Fails closed on vacuity: if either base tuple throws, the whole matrix would
+ * "pass" for the wrong reason, so that is a die() rather than a miss.
+ *
+ * @param {(text:*, font:*, bw:*, bh:*, lh:*, scale:*)=>number} call
+ * @param {string} label   Named in every failure message.
+ * @returns {number}       Number of rows the door failed to reject correctly.
+ */
+export function doorMisses(call, label) {
+    // The negative half, first and always: both known-good tuples are accepted.
+    const bases = [DOOR_BASE_A, DOOR_BASE_B];
+    for (let b = 0; b < bases.length; b++) {
+        const g = bases[b];
+        let n = -1;
+        try {
+            n = call(g.text, FONT, g.bw, g.bh, g.lh, g.scale);
+        } catch (err) {
+            die('doorMisses(' + label + '): the known-good base tuple ' + (b === 0 ? 'A' : 'B') +
+                ' threw ' + (err && err.name) + ' -- every rejection below would pass vacuously');
+        }
+        if (!(n >= 1)) {
+            die('doorMisses(' + label + '): base tuple ' + (b === 0 ? 'A' : 'B') + ' returned ' + n +
+                ', expected a real line count -- the matrix is measuring nothing');
+        }
+    }
+
+    let misses = 0;
+    for (let r = 0; r < DOOR_ROWS.length; r++) {
+        const row = DOOR_ROWS[r];
+        const g = row.base === 'B' ? DOOR_BASE_B : DOOR_BASE_A;
+        const text = row.arg === 'text' ? row.value : g.text;
+        const font = row.arg === 'font' ? row.value : FONT;
+        const bw = row.arg === 'bw' ? row.value : g.bw;
+        const bh = row.arg === 'bh' ? row.value : g.bh;
+        const lh = row.arg === 'lh' ? row.value : g.lh;
+        const sc = row.arg === 'scale' ? row.value : g.scale;
+        let threw = false;
+        let msg = '';
+        try {
+            call(text, font, bw, bh, lh, sc);
+        } catch (err) {
+            threw = err instanceof TextLayoutError;
+            msg = (err && err.message) || '';
+        }
+        if (!threw) { misses++; continue; }
+        for (let k = 0; k < row.needs.length; k++) {
+            if (msg.indexOf(row.needs[k]) === -1) { misses++; break; }
+        }
+        // TL-09's whole point: the message must not be a raw property read.
+        if (msg.indexOf('Cannot read properties') !== -1) misses++;
+    }
+    return misses;
+}
+
+// --- the whitespace/CR detectors (TL-26, TL-13) ----------------------------
+
+/**
+ * Count PHANTOM lines in a written layout: zero-length ranges whose preceding
+ * character is a space. That is exactly TL-26's signature, and exactly the
+ * discriminator that leaves a DELIBERATE blank line (preceded by a newline)
+ * alone. Shared so T1's pins and T9 control 11 cannot test different things.
+ *
+ * @param {string} text
+ * @param {Float32Array} buf
+ * @param {number} n
+ * @returns {number}
+ */
+export function countPhantoms(text, buf, n) {
+    let c = 0;
+    for (let k = 0; k < n; k++) {
+        const s = buf[k * 4];
+        if (s === buf[k * 4 + 1] && s > 0 && text.charCodeAt(s - 1) === 32) c++;
+    }
+    return c;
+}
+
+/**
+ * Count emitted ranges that contain a CR immediately followed by an LF. A
+ * renderer walking `[start, end)` would draw that CR, and the CR is not in
+ * `lineWidth` -- TL-13 exactly. Shared with T9 control 12.
+ *
+ * @param {string} text
+ * @param {Float32Array} buf
+ * @param {number} n
+ * @returns {number}
+ */
+export function crlfInRange(text, buf, n) {
+    let c = 0;
+    for (let k = 0; k < n; k++) {
+        const s = buf[k * 4];
+        const e = buf[k * 4 + 1];
+        for (let j = s; j < e; j++) {
+            if (text.charCodeAt(j) === 13 && text.charCodeAt(j + 1) === 10) { c++; break; }
+        }
+    }
+    return c;
+}
+
+// --- the flags tripwire ----------------------------------------------------
+
+/**
+ * Walk the flags slots (3, 7, 11, ...) of the first `n` lines of `buf` and
+ * report two INDEPENDENT violation classes as one packed integer:
+ *
+ *   - bit 1 and above: the number of slots holding a value outside
+ *     `{FLAG_NORMAL, FLAG_TRUNCATED, FLAG_OVERFLOW}`. NaN fails all three
+ *     equalities and is counted, which is the fail-closed answer.
+ *   - bit 0: 1 when this ONE output carries both a FLAG_TRUNCATED line and a
+ *     FLAG_OVERFLOW line. The two are documented mutually exclusive in a single
+ *     call (decisions/0001-flag-overflow.md); a run carrying both means a
+ *     truncating call also overflowed its buffer, which the contract forbids.
+ *
+ * Unpack as `count >> 1` (bad values) and `count & 1` (both flags).
+ *
+ * Allocation-free by construction -- four number locals, no arrays, no
+ * subarray, no closure. T5 calls it 50,000 times and T9 control 8 gates it, so
+ * the control cannot test a weaker predicate than the fuzz does.
+ *
+ * @param {Float32Array} buf
+ * @param {number} n   Number of lines written into `buf`.
+ * @returns {number}   `(badValueCount << 1) | bothFlags`
+ */
+export function scanFlags(buf, n) {
+    let bad = 0;
+    let hasTrunc = 0;
+    let hasOver = 0;
+    for (let k = 0; k < n; k++) {
+        const f = buf[k * 4 + 3];
+        if (f === FLAG_NORMAL) continue;
+        if (f === FLAG_TRUNCATED) { hasTrunc = 1; continue; }
+        if (f === FLAG_OVERFLOW) { hasOver = 1; continue; }
+        bad++;
+    }
+    return (bad * 2) + (hasTrunc & hasOver);
 }
 
 // --- the countLines agreement comparator -----------------------------------

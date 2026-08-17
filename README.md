@@ -118,12 +118,33 @@ if (layout[lineCount * 4 - 1] === FLAG_TRUNCATED) {
 
 - **Soft-break** at the last space when adding the next glyph would exceed `boxWidth`.
   The breaking space is excluded from both sides; runs of leading whitespace on the
-  next line are skipped.
+  next line are skipped **after a soft break**.
+- **Leading whitespace is content.** At the start of the text, and immediately after an
+  explicit `\n`, it is NOT skipped: `computeWrap('   ', ...)` is one line of width
+  `3 * space`, not an empty layout. Indentation is never silently destroyed -- call
+  `trim()` yourself if you want it gone. Deliberate; see `decisions/0002-input-door.md`.
 - **Hard-break** inside a word when no space is available within the current line.
   Kerning is reset across the break.
+- **An over-wide glyph is emitted, unflagged.** A single glyph wider than `boxWidth`
+  produces a line wider than the box. "At least one glyph per line" is what makes the
+  loop terminate; the over-wide line is the price of that guarantee.
 - **Explicit `\n`** starts a new line and is not rendered.
+- **CRLF.** A `\r` **immediately preceding** a `\n` is a line terminator and is excluded
+  from the emitted range, so the range and `lineWidth` agree -- `'AAA\r\nBBB'` lays out
+  identically to `'AAA\nBBB'`. A **lone `\r`** is not a terminator: it stays inside the
+  range with its atlas advance (0 in a normal font). The LF-identity holds whenever the
+  CR's own advance does not force a wrap -- always true for a real atlas, where a CR is
+  not a printable glyph. A hand-rolled atlas giving glyph 13 a non-zero advance, in a
+  box narrow enough to wrap on it, is out of contract; the CR is still never inside an
+  emitted range.
 - **`boxWidth === 0`** disables horizontal wrapping (only `\n` and truncation apply).
+  `0` is the documented way to say "no limit"; a negative or non-finite `boxWidth` throws.
 - **`boxHeight === 0`** disables vertical truncation entirely.
+- **A box under one line returns `0`.** With `boxHeight > 0` and
+  `lineHeight * scale > boxHeight`, `computeWrap` returns `0` and writes nothing. The
+  boundary is `>`, not `>=`: a box exactly one line tall still emits its line.
+- **Index ceiling.** `startIdx` and `endIdx` are Float32 slots, exact only to
+  2^24 = 16777216. A longer text is out of domain -- documented, not policed.
 
 ## Truncation
 
@@ -133,6 +154,11 @@ ASCII `.` glyphs) -- no per-frame string allocation.
 
 To make the ellipsis fit cleanly, `computeWrap` tracks the latest position on each line
 where *content + ellipsis* still fits within `boxWidth`. The truncated line ends there.
+
+**A truncated line's `lineWidth` includes the ellipsis allowance.** For content 36 plus
+an 18px ellipsis the slot reads `54`, not `36`. A consumer summing widths for centring
+must expect a `FLAG_TRUNCATED` line to measure wider than the glyphs in
+`[startIdx, endIdx)`.
 
 Edge cases worth knowing:
 
@@ -162,6 +188,49 @@ Counts the lines `computeWrap` would write into an unbounded buffer -- same para
 same order, minus `outBuffer`. Size a buffer that can never overflow as
 `new Float32Array(countLines(...) * 4)`. Agrees with `computeWrap` on every wrapping and
 truncating call.
+
+### `TextLayoutError`
+
+```javascript
+import { TextLayoutError } from '@zakkster/lite-text-layout';
+```
+
+`class TextLayoutError extends Error`, with `name === 'TextLayoutError'`. Both entry
+points validate every argument once, at entry, through **one shared validator** called
+as their first statement -- before the loop, never from inside it. The message names the
+argument, what it received and what is required.
+
+`NaN` is not infinity and `null` is not zero. Before 1.2.0 none of these threw:
+`boxWidth = NaN` silently meant "no horizontal limit", `scale = NaN` silently disabled
+wrapping entirely, a 700-entry glyph table silently made every width `NaN`, and
+`text = 12345` silently returned `0`.
+
+| Argument | Requirement |
+|----------|-------------|
+| `text` | a string |
+| `font` | an object exposing both tables |
+| `font.glyphs` | length >= 1792 (256 ids x 7 fields) |
+| `font.kerning` | length >= 65536 (256 x 256 pair LUT) |
+| `boxWidth` | finite and >= 0 (`0` means no limit) |
+| `boxHeight` | finite and >= 0 (`0` means no limit) |
+| `lineHeight` | finite always; `> 0` when `boxHeight > 0` |
+| `scale` | finite and `> 0` |
+| `outBuffer` | a `Float32Array` (`computeWrap` only) |
+
+Checks run in that exact order, so a tuple wrong in two places always reports the same
+argument. `lineHeight` is conditional on purpose:
+`computeWrap('AAA', font, 0, 0, 0, out)` does **not** throw -- with no vertical box the
+value is never read -- while `computeWrap('AAA', font, 0, 32, 0, out)` does.
+
+**Cross-realm caveat.** The `outBuffer` check is `instanceof Float32Array`, so a
+`Float32Array` from another realm (a `vm` context, an iframe) is rejected. That is
+deliberate: the alternative is a duck-type check that accepts any object naming itself
+`Float32Array`. Copy into a same-realm view.
+
+**Aliasing.** An `outBuffer` overlapping `font.glyphs` through a shared `ArrayBuffer` is
+caller error with an undefined result, and is **not** checked at runtime -- a `.buffer`
+identity check would reject a caller packing *disjoint* views into one arena, which is
+correct code.
 
 ### Constants
 
@@ -201,6 +270,9 @@ Full TypeScript declarations included in `TextLayout.d.ts`. Exports:
 See `llms.txt` for AI-optimized metadata and usage examples.
 
 ## Changelog
+
+### 1.2.0
+- Added `TextLayoutError` and the input door: every argument is validated once, at entry, by one shared validator serving both entry points. `boxWidth`/`boxHeight` negative or non-finite, `scale` non-finite or `<= 0`, `lineHeight` non-finite (or `<= 0` with `boxHeight > 0`), a short `font.glyphs`/`font.kerning`, a non-string `text` and a non-`Float32Array` `outBuffer` now throw instead of silently producing NaN widths, no wrapping, or `0`. Fixed: a `\r` immediately before a `\n` is excluded from the emitted range, and the phantom zero-width line after a whitespace soft break is gone (a deliberate blank line survives). Defined: a box under one line returns `0` and writes nothing. Documented: leading whitespace is skipped only after a soft break, an over-wide glyph is emitted unflagged, a truncated line's width includes the ellipsis allowance, and indices are exact to 2^24 = 16777216. MINOR -- see `decisions/0002-input-door.md`.
 
 ### 1.1.0
 - Added `FLAG_OVERFLOW = 2` (an undersized buffer now reports itself on the last written line's flags slot), `countLines` for overflow-proof buffer sizing, and a frozen `TextLayout` namespace. Zero-capacity buffers return `0` and write nothing; `FLAG_OVERFLOW` and `FLAG_TRUNCATED` are mutually exclusive. Law 6: compare flags by equality, never by truthiness. MINOR -- see `decisions/0001-flag-overflow.md`.

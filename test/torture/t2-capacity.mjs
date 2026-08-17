@@ -11,11 +11,27 @@
  * records the undecided policy as a todo for TL2.
  */
 
-import { TextLayout, FLAG_NORMAL, FLAG_TRUNCATED, FLAG_OVERFLOW } from '../../TextLayout.js';
-import { FONT, POISON, check, knownFailing, todo } from './harness.mjs';
+import {
+    TextLayout, TextLayoutError, FLAG_NORMAL, FLAG_TRUNCATED, FLAG_OVERFLOW,
+} from '../../TextLayout.js';
+import { FONT, POISON, check } from './harness.mjs';
 
 const TEN = 'AAA BBB CCC DDD EEE FFF GGG HHH III JJJ';   // 10 words, one per line at boxWidth 40
 const THREE = 'AAA BBB CCC';                              // 3 words, one per line at boxWidth 40
+
+/**
+ * True when `fn` throws a `TextLayoutError` naming BOTH `outBuffer` and
+ * `Float32Array`. Naming both is what stops the row passing on a message about
+ * some other argument.
+ */
+function throwsBufferDoor(fn) {
+    try { fn(); } catch (e) {
+        return e instanceof TextLayoutError &&
+            e.message.indexOf('outBuffer') !== -1 &&
+            e.message.indexOf('Float32Array') !== -1;
+    }
+    return false;
+}
 
 export function run() {
     // length 0 and 1..3 (under one stride) -> 0.
@@ -126,25 +142,35 @@ export function run() {
             () => 'T2 TL-01(i): slot ' + j + ' is FLAG_OVERFLOW on a truncating call (must be mutually exclusive)');
     }
 
-    // TL-10 -- outBuffer type is unchecked.
-    knownFailing('TL-10 (plain Array accepted)', () => {
-        const a = new Array(16).fill(0);
-        const nA = TextLayout.computeWrap('AAA BBB', FONT, 40, 0, 16, a, 1);
-        return nA === 2 && a[0] === 0 && a[1] === 3 && a[2] === 36;
-    });
-    knownFailing('TL-10 (Float64Array accepted)', () => {
-        const f = new Float64Array(16);
-        const nF = TextLayout.computeWrap('AAA BBB', FONT, 40, 0, 16, f, 1);
-        return nF === 2 && f[2] === 36;
-    });
-    knownFailing('TL-10 (Int32Array truncates width)', () => {
-        const it = new Int32Array(16);
-        const nI = TextLayout.computeWrap('A', FONT, 0, 0, 16, it, 0.1);
-        // true width is 1.2 (12 * 0.1); an Int32 buffer stores only the integer part
-        return nI === 1 && it[2] === 1;
-    });
+    // TL-10 PROMOTED (TL2): outBuffer must be a Float32Array. The negative half
+    // first -- the SAME call with a real Float32Array is accepted -- so no row
+    // below can pass because the tuple was wrong somewhere else (AR-02).
+    const goodOut = new Float32Array(16);
+    check(TextLayout.computeWrap('AAA BBB', FONT, 40, 0, 16, goodOut, 1) === 2 &&
+        goodOut[0] === 0 && goodOut[1] === 3 && goodOut[2] === 36,
+        () => 'T2 TL-10 base: the known-good Float32Array tuple must lay out 2 lines');
+    check(throwsBufferDoor(() => TextLayout.computeWrap('AAA BBB', FONT, 40, 0, 16, new Array(16).fill(0), 1)),
+        () => 'T2 TL-10 (plain Array): must throw a TextLayoutError naming outBuffer and Float32Array');
+    check(throwsBufferDoor(() => TextLayout.computeWrap('AAA BBB', FONT, 40, 0, 16, new Float64Array(16), 1)),
+        () => 'T2 TL-10 (Float64Array): must throw a TextLayoutError naming outBuffer and Float32Array');
+    check(throwsBufferDoor(() => TextLayout.computeWrap('A', FONT, 0, 0, 16, new Int32Array(16), 0.1)),
+        () => 'T2 TL-10 (Int32Array): must throw rather than silently truncate lineWidth to an integer');
+    check(throwsBufferDoor(() => TextLayout.computeWrap('AAA BBB', FONT, 40, 0, 16, undefined, 1)),
+        () => 'T2 TL-10 (undefined): must throw a TextLayoutError naming outBuffer and Float32Array');
+    check(throwsBufferDoor(() => TextLayout.computeWrap('AAA BBB', FONT, 40, 0, 16, null, 1)),
+        () => 'T2 TL-10 (null): must throw a TextLayoutError naming outBuffer and Float32Array');
+    // countLines takes no buffer, so the SAME five leading arguments must work
+    // there with no buffer check at all. This is the half that proves the
+    // outBuffer door lives in computeWrap only and did not leak into the door.
+    check(TextLayout.countLines('AAA BBB', FONT, 40, 0, 16, 1) === 2,
+        () => 'T2 TL-10: countLines must not have grown an outBuffer check');
 
-    // outBuffer aliasing font.glyphs' ArrayBuffer -- undecided policy, pin today.
+    // outBuffer aliasing font.glyphs' ArrayBuffer -- policy CLOSED in TL2 as
+    // DOCUMENT (decisions/0002-input-door.md): caller error, undefined result,
+    // no runtime check. A `.buffer` identity check would reject a caller who
+    // packs DISJOINT views into one arena, which is correct code. Today's
+    // observed result stays pinned so the "undefined result" claim is at least
+    // stable, and the falsifiable half is pinned below it.
     const g = new Int16Array(256 * 7);
     for (let i = 65; i <= 90; i++) g[i * 7 + 6] = 12;
     g[32 * 7 + 6] = 6;
@@ -154,5 +180,24 @@ export function run() {
     const nAlias = TextLayout.computeWrap('AAA BBB', aliasFont, 40, 0, 16, aliasOut, 1);
     check(nAlias === 2 && aliasOut[0] === 0 && aliasOut[1] === 3 && aliasOut[2] === 36,
         () => 'T2 alias: observed result changed (was 2 lines, first line [0,3,36])');
-    todo('TL2', 'outBuffer aliasing font.glyphs is policy-undecided -- lands in TL2');
+
+    // The falsifiable half of the aliasing policy (G5): DISJOINT views of ONE
+    // ArrayBuffer must NOT throw. This is the arena counter-example that a
+    // `.buffer` identity check would have broken, so it is pinned by name.
+    const arena = new ArrayBuffer(8192);
+    const arenaGlyphs = new Int16Array(arena, 0, 256 * 7);      // bytes [0, 3584)
+    for (let i = 65; i <= 90; i++) arenaGlyphs[i * 7 + 6] = 12;
+    arenaGlyphs[32 * 7 + 6] = 6;
+    const arenaOut = new Float32Array(arena, 4096, 64);          // bytes [4096, 4352)
+    check(arenaGlyphs.buffer === arenaOut.buffer,
+        () => 'T2 arena: the two views must share one ArrayBuffer or the pin proves nothing');
+    const arenaFont = { glyphs: arenaGlyphs, kerning: new Int16Array(65536) };
+    let arenaThrew = false;
+    let arenaN = -1;
+    try {
+        arenaN = TextLayout.computeWrap('AAA BBB', arenaFont, 40, 0, 16, arenaOut, 1);
+    } catch (err) { arenaThrew = true; }
+    check(!arenaThrew && arenaN === 2 && arenaOut[0] === 0 && arenaOut[1] === 3 && arenaOut[2] === 36,
+        () => 'T2 arena: disjoint views of one ArrayBuffer must lay out normally -- a .buffer ' +
+            'identity check would have rejected correct code');
 }

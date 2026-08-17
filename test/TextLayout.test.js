@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { TextLayout, FLAG_NORMAL, FLAG_TRUNCATED, FLAG_OVERFLOW } from '../TextLayout.js';
+import { TextLayout, TextLayoutError, FLAG_NORMAL, FLAG_TRUNCATED, FLAG_OVERFLOW } from '../TextLayout.js';
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -509,5 +509,282 @@ describe('overflow reporting and countLines', () => {
     it('freezes the TextLayout namespace: assignment throws', () => {
         assert.equal(Object.isFrozen(TextLayout), true);
         assert.throws(() => { TextLayout.computeWrap2 = () => {}; }, TypeError);
+    });
+});
+
+// -----------------------------------------------------------------------------
+// The input door, CRLF and the deliberate behaviours (TL2, 1.2.0)
+//
+// AR-02 rule, applied to every case below: start from a KNOWN-GOOD tuple the
+// same test first asserts does NOT throw, then vary EXACTLY ONE argument. A
+// door test whose tuple is wrong in two places passes for the wrong reason.
+// -----------------------------------------------------------------------------
+
+describe('input door, CRLF and the deliberate behaviours', () => {
+    /**
+     * The two known-good tuples every door case varies EXACTLY ONE argument
+     * from. `goodA` has boxHeight 0, where `lineHeight <= 0` is legal because
+     * the value is never read. `goodB` has boxHeight 64 with lineHeight 16
+     * (16 * 1 <= 64, so no zero-line early exit), the only regime in which
+     * `lineHeight <= 0` is rejected -- so a lineHeight row varies lineHeight
+     * alone, against a base the test first proves is accepted.
+     */
+    const goodA = () => ({ text: 'AAA BBB', font: makeFont(), bw: 100, bh: 0, lh: 16, out: buf(8), s: 1 });
+    const goodB = () => ({ text: 'AAA BBB', font: makeFont(), bw: 100, bh: 64, lh: 16, out: buf(8), s: 1 });
+    const good = goodA;
+    const call = (g) => TextLayout.computeWrap(g.text, g.font, g.bw, g.bh, g.lh, g.out, g.s);
+    /** Assert a TextLayoutError whose message contains every substring. */
+    const doorThrows = (fn, ...needs) => {
+        assert.throws(fn, (err) => {
+            assert.ok(err instanceof TextLayoutError, 'expected TextLayoutError, got ' + err.name);
+            assert.doesNotMatch(err.message, /Cannot read properties/);
+            for (const s of needs) assert.ok(err.message.includes(s), 'message must contain ' + s + ': ' + err.message);
+            return true;
+        });
+    };
+
+    it('exports TextLayoutError as an Error subclass with the documented name', () => {
+        const e = new TextLayoutError('x');
+        assert.ok(e instanceof Error);
+        assert.ok(e instanceof TextLayoutError);
+        assert.equal(e.name, 'TextLayoutError');
+        assert.equal(e.message, 'x');
+    });
+
+    it('rejects a non-string text: 12345, null, undefined, ["A"]', () => {
+        assert.equal(call(good()), 1);   // the known-good tuple is accepted
+        for (const bad of [12345, null, undefined, ['A']]) {
+            const g = good(); g.text = bad;
+            doorThrows(() => call(g), 'text', 'string');
+        }
+    });
+
+    it('rejects a font that is missing or is not an object: {}, null, undefined', () => {
+        assert.equal(call(good()), 1);
+        const empty = good(); empty.font = {};
+        doorThrows(() => call(empty), 'font.glyphs');
+        for (const bad of [null, undefined]) {
+            const g = good(); g.font = bad;
+            doorThrows(() => call(g), 'font');
+        }
+    });
+
+    it('rejects short glyph and kerning tables, naming the received and required lengths', () => {
+        assert.equal(call(good()), 1);
+        const shortG = good();
+        shortG.font = { glyphs: new Int16Array(700), kerning: new Int16Array(65536) };
+        doorThrows(() => call(shortG), 'font.glyphs', '700', '1792');
+        const shortK = good();
+        shortK.font = { glyphs: makeFont().glyphs, kerning: new Int16Array(4) };
+        doorThrows(() => call(shortK), 'font.kerning', '4', '65536');
+    });
+
+    it('rejects scale NaN / Infinity / 0 / -1 and accepts scale 2', () => {
+        assert.equal(call(good()), 1);
+        for (const bad of [NaN, Infinity, -Infinity]) {
+            const g = good(); g.s = bad;
+            doorThrows(() => call(g), 'scale', 'finite');
+        }
+        for (const bad of [0, -1]) {
+            const g = good(); g.s = bad;
+            doorThrows(() => call(g), 'scale', '> 0');
+        }
+        const two = good(); two.s = 2;
+        assert.equal(call(two), 2);   // 'AAA BBB' at scale 2 no longer fits 100px
+    });
+
+    it('rejects boxWidth -1 / -100 / NaN / -Infinity, and 0 still means no limit', () => {
+        assert.equal(call(good()), 1);
+        for (const bad of [-1, -100]) {
+            const g = good(); g.bw = bad;
+            doorThrows(() => call(g), 'boxWidth', 'negative');
+        }
+        for (const bad of [NaN, -Infinity, Infinity]) {
+            const g = good(); g.bw = bad;
+            doorThrows(() => call(g), 'boxWidth', 'finite');
+        }
+        const zero = good(); zero.bw = 0;
+        assert.equal(call(zero), 1);
+        assert.deepEqual(readLines(zero.out, 1), [{ start: 0, end: 7, width: 78, flags: FLAG_NORMAL }]);
+    });
+
+    it('rejects boxHeight NaN and negative, and 0 still means no truncation', () => {
+        assert.equal(call(good()), 1);
+        for (const bad of [-1, -100]) {
+            const g = good(); g.bh = bad;
+            doorThrows(() => call(g), 'boxHeight', 'negative');
+        }
+        for (const bad of [NaN, Infinity, -Infinity]) {
+            const g = good(); g.bh = bad;
+            doorThrows(() => call(g), 'boxHeight', 'finite');
+        }
+        // `0` still means no truncation: vary text alone, boxHeight is already 0.
+        const five = good(); five.text = 'A\nB\nC\nD\nE';
+        assert.equal(call(five), 5);
+    });
+
+    it('rejects lineHeight NaN always, but 0 and -16 only when boxHeight > 0', () => {
+        // BOTH bases are proved accepted before a single rejection is tested.
+        assert.equal(call(goodA()), 1);
+        assert.equal(call(goodB()), 1);
+        // NaN throws from either base -- one argument varied, twice.
+        const nanA = goodA(); nanA.lh = NaN;
+        doorThrows(() => call(nanA), 'lineHeight', 'finite');
+        const nanB = goodB(); nanB.lh = NaN;
+        doorThrows(() => call(nanB), 'lineHeight', 'finite');
+        for (const bad of [0, -16]) {
+            // From base B (boxHeight 64), vary lineHeight alone -> throws.
+            const withBox = goodB(); withBox.lh = bad;
+            doorThrows(() => call(withBox), 'lineHeight', '> 0');
+            // From base A (boxHeight 0), vary lineHeight alone -> legal, because
+            // the value is never read. This is the half that proves the door is
+            // conditional and not blanket.
+            const noBox = goodA(); noBox.lh = bad;
+            assert.equal(call(noBox), 1);
+        }
+    });
+
+    it('rejects an outBuffer that is not a Float32Array', () => {
+        assert.equal(call(good()), 1);
+        const font = makeFont();
+        for (const bad of [new Int32Array(16), new Float64Array(16), new Array(16).fill(0), undefined, null]) {
+            assert.throws(
+                () => TextLayout.computeWrap('AAA BBB', font, 100, 0, 16, bad, 1),
+                (err) => {
+                    assert.ok(err instanceof TextLayoutError);
+                    assert.ok(err.message.includes('outBuffer'));
+                    assert.ok(err.message.includes('Float32Array'));
+                    return true;
+                },
+            );
+        }
+    });
+
+    it('shares the door with countLines, same messages, minus the outBuffer check', () => {
+        // Same two bases, same one-argument-at-a-time rule, no outBuffer.
+        const cl = (g) => TextLayout.countLines(g.text, g.font, g.bw, g.bh, g.lh, g.s);
+        assert.equal(cl(goodA()), 1);
+        assert.equal(cl(goodB()), 1);
+        const badText = goodA(); badText.text = 12345;
+        doorThrows(() => cl(badText), 'text', 'string');
+        const badFont = goodA(); badFont.font = null;
+        doorThrows(() => cl(badFont), 'font');
+        const badBw = goodA(); badBw.bw = -100;
+        doorThrows(() => cl(badBw), 'boxWidth', 'negative');
+        const badScale = goodA(); badScale.s = NaN;
+        doorThrows(() => cl(badScale), 'scale', 'finite');
+        const badLh = goodB(); badLh.lh = 0;   // one argument off base B
+        doorThrows(() => cl(badLh), 'lineHeight', '> 0');
+        // The messages are the SAME strings computeWrap produces, not lookalikes:
+        // one tuple, one varied argument, both entry points.
+        const g = goodA(); g.bw = -100;
+        const viaWrap = (() => { try { call(g); } catch (e) { return e.message; } })();
+        const viaCount = (() => { try { cl(g); } catch (e) { return e.message; } })();
+        assert.equal(viaCount, viaWrap);
+        assert.match(viaCount, /boxWidth/);
+    });
+
+    it('returns 0 and leaves the buffer bit-identical when the box is under one line', () => {
+        const font = makeFont();
+        const out = buf(8).fill(-999);
+        const snapshot = Float32Array.from(out);
+        assert.equal(TextLayout.computeWrap('AAA', font, 0, 8, 16, out, 1), 0);
+        assert.deepEqual(Array.from(out), Array.from(snapshot));
+        assert.equal(TextLayout.countLines('AAA', font, 0, 8, 16, 1), 0);
+        // The boundary is `>`, not `>=`: a box exactly one line tall still emits.
+        assert.equal(TextLayout.computeWrap('AAA', font, 0, 16, 16, out, 1), 1);
+        // And it is lineHeight * scale that is measured, not lineHeight.
+        assert.equal(TextLayout.computeWrap('AAA', font, 0, 31, 16, out, 2), 0);
+    });
+
+    it('lays CRLF out identically to LF and keeps a lone CR inside the range', () => {
+        const font = makeFont();
+        assert.equal(font.glyphs[13 * 7 + 6], 0, 'CR must have zero advance or the width pins measure the atlas');
+        const lf = buf(8);
+        const crlf = buf(8);
+        assert.equal(TextLayout.computeWrap('AAA\nBBB', font, 0, 0, 16, lf, 1), 2);
+        assert.equal(TextLayout.computeWrap('AAA\r\nBBB', font, 0, 0, 16, crlf, 1), 2);
+        assert.deepEqual(readLines(lf, 2), [
+            { start: 0, end: 3, width: 36, flags: FLAG_NORMAL },
+            { start: 4, end: 7, width: 36, flags: FLAG_NORMAL },
+        ]);
+        assert.deepEqual(readLines(crlf, 2), [
+            { start: 0, end: 3, width: 36, flags: FLAG_NORMAL },
+            { start: 5, end: 8, width: 36, flags: FLAG_NORMAL },
+        ]);
+        // A LONE CR is not a terminator: one line, the CR inside the range.
+        const lone = buf(4);
+        assert.equal(TextLayout.computeWrap('AAA\rBBB', font, 0, 0, 16, lone, 1), 1);
+        assert.deepEqual(readLines(lone, 1), [{ start: 0, end: 7, width: 72, flags: FLAG_NORMAL }]);
+        assert.equal(TextLayout.countLines('AAA\r\nBBB', font, 0, 0, 16, 1), 2);
+        // The TRUNCATING arm of the newline branch is a SECOND emitting path,
+        // and boxHeight 0 never reaches it. Swept, and pinned to the LF run by
+        // construction rather than to copied literals.
+        for (const bh of [16, 32, 48, 64]) {
+            const lfT = buf(16);
+            const crT = buf(16);
+            const nL = TextLayout.computeWrap('AAA\nBBB', font, 0, bh, 16, lfT, 1);
+            const nC = TextLayout.computeWrap('AAA\r\nBBB', font, 0, bh, 16, crT, 1);
+            assert.equal(nC, nL, 'boxHeight ' + bh + ': CRLF line count must match LF');
+            for (let k = 0; k < nL; k++) {
+                const shift = lfT[k * 4] > 3 ? 1 : 0;
+                assert.deepEqual(
+                    [crT[k * 4], crT[k * 4 + 1], crT[k * 4 + 2], crT[k * 4 + 3]],
+                    [lfT[k * 4] + shift, lfT[k * 4 + 1] + shift, lfT[k * 4 + 2], lfT[k * 4 + 3]],
+                    'boxHeight ' + bh + ' line ' + k + ': CRLF must match LF shifted by ' + shift,
+                );
+            }
+            assert.equal(TextLayout.countLines('AAA\r\nBBB', font, 0, bh, 16, 1), nC);
+        }
+        // The exact row that was broken: boxHeight 16 truncates to one line and
+        // endIdx must be 3, not 4 -- index 3 IS the CR. Width 54 is content 36
+        // plus this font's 18px ellipsis allowance (TL-12), not 36: `makeFont`
+        // gives '.' a real width, unlike the torture stub.
+        const trunc = buf(4);
+        assert.equal(TextLayout.computeWrap('AAA\r\nBBB', font, 0, 16, 16, trunc, 1), 1);
+        assert.deepEqual(readLines(trunc, 1), [{ start: 0, end: 3, width: 54, flags: FLAG_TRUNCATED }]);
+    });
+
+    it('drops the phantom line but keeps a deliberate blank line', () => {
+        const font = makeFont();
+        // The phantom: trailing whitespace soft-breaks immediately before a \n.
+        const ph = buf(8);
+        assert.equal(TextLayout.computeWrap('AAA \nBBB', font, 40, 0, 16, ph, 1), 2);
+        assert.deepEqual(readLines(ph, 2), [
+            { start: 0, end: 3, width: 36, flags: FLAG_NORMAL },
+            { start: 5, end: 8, width: 36, flags: FLAG_NORMAL },
+        ]);
+        assert.equal(TextLayout.countLines('AAA \nBBB', font, 40, 0, 16, 1), 2);
+        // The other direction, and it is the whole difference between a fix and
+        // a regression: a blank line the author wrote survives, because the
+        // character before lineStart is 10, not 32.
+        const blank = buf(8);
+        assert.equal(TextLayout.computeWrap('AAA\n\nBBB', font, 0, 0, 16, blank, 1), 3);
+        assert.deepEqual(readLines(blank, 3), [
+            { start: 0, end: 3, width: 36, flags: FLAG_NORMAL },
+            { start: 4, end: 4, width: 0, flags: FLAG_NORMAL },
+            { start: 5, end: 8, width: 36, flags: FLAG_NORMAL },
+        ]);
+        assert.equal(TextLayout.countLines('AAA\n\nBBB', font, 0, 0, 16, 1), 3);
+    });
+
+    it('preserves leading spaces, emits an over-wide glyph, and pins the 2^24 ceiling', () => {
+        const font = makeFont();
+        // TL-14, DELIBERATE: indentation is content, not noise to be trimmed.
+        const sp = buf(4);
+        assert.equal(TextLayout.computeWrap('   ', font, 0, 0, 16, sp, 1), 1);
+        assert.deepEqual(readLines(sp, 1), [{ start: 0, end: 3, width: 18, flags: FLAG_NORMAL }]);
+        assert.equal(TextLayout.computeWrap('   AAA', font, 0, 0, 16, sp, 1), 1);
+        assert.deepEqual(readLines(sp, 1), [{ start: 0, end: 6, width: 54, flags: FLAG_NORMAL }]);
+        // TL-24, DELIBERATE: one glyph per line beats an infinite loop.
+        const wide = buf(4);
+        assert.equal(TextLayout.computeWrap('A', font, 4, 0, 16, wide, 1), 1);
+        assert.deepEqual(readLines(wide, 1), [{ start: 0, end: 1, width: 12, flags: FLAG_NORMAL }]);
+        // TL-15, DOCUMENTED: indices are Float32 and exact only to 16777216.
+        assert.equal(Math.fround(16777217), 16777216);
+        assert.equal(Math.fround(16777219), 16777220);
+        const slot = new Float32Array(1);
+        slot[0] = 16777217;
+        assert.equal(slot[0], 16777216);
     });
 });

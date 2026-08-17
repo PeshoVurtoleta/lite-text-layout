@@ -37,7 +37,11 @@ const FROUND_POISON = Math.fround(POISON);
 // Box-height sweep for the countLines agreement law (law 9). Includes 0 (no
 // truncation) and 1e9 (effectively unbounded) so agreement is proved on
 // non-truncating AND truncating input, not just one regime.
-const BOX_HEIGHTS = [0, 16, 32, 48, 1e9];
+// `8` (TL2) is a box UNDER one line at LH 16: it exercises C4's zero-line
+// policy, which is the one rule deliberately duplicated in both entry points.
+// Without this row the policy would ship untested by the law that exists to
+// catch exactly that kind of drift.
+const BOX_HEIGHTS = [0, 8, 16, 32, 48, 1e9];
 
 const CORPUS = makeCorpus(makePrng(SEED), CASES);
 const OUT = new Float32Array(4 * MAXLINES);
@@ -237,6 +241,57 @@ export function run() {
     check(mism === 0,
         () => 'T0 law9 agreement: countLines disagreed with computeWrap on ' + mism + ' of ' +
             AGREE_CORPUS.length + ' crossed cases');
+
+    // Law 11 (TL2) -- the f32 index ceiling, TL-15's policy-C pin as a named
+    // law. `startIdx`/`endIdx` are Float32 slots, so indices are exact only to
+    // 2^24 = 16777216. These two round trips are the documented boundary, and
+    // the day the buffer element type changes they fail and the four
+    // documentation surfaces follow.
+    check(Math.fround(16777217) === 16777216,
+        () => 'T0 law11 TL-15: Math.fround(16777217) is ' + Math.fround(16777217) +
+            ', expected 16777216 -- the documented f32 index ceiling moved');
+    check(Math.fround(16777219) === 16777220,
+        () => 'T0 law11 TL-15: Math.fround(16777219) is ' + Math.fround(16777219) +
+            ', expected 16777220 -- the documented f32 index rounding moved');
+    // Not an IEEE identity in isolation: tie it to the SUBJECT's slot type, so
+    // the law is about this library and not about floating point.
+    const ceilBuf = new Float32Array(4);
+    ceilBuf[1] = 16777217;
+    check(ceilBuf[1] === 16777216,
+        () => 'T0 law11 TL-15: an endIdx slot stored 16777217 as ' + ceilBuf[1] +
+            ' -- the output buffer is no longer Float32 and the docs are stale');
+
+    // Law 12 (TL2) -- SCALE INVARIANCE, the single assertion that catches
+    // TL-03 through TL-06 at once. Scaling the box and the scale together must
+    // reproduce the s=1 partition exactly and multiply every width by s
+    // exactly. Powers of two ONLY: 0.1 would make this a float-equality
+    // lottery, and a flaky gate is worse than no gate.
+    const SCALE_INV = [0.5, 2, 4];
+    const invRef = new Float32Array(4 * MAXLINES);
+    const invGot = new Float32Array(4 * MAXLINES);
+    let invViolations = 0;
+    for (let ci = 0; ci < CASES; ci++) {
+        const text = CORPUS[ci].text;
+        const bw = Math.ceil(CORPUS[ci].boxWidth);   // integral, so s*bw is exact
+        const bh = 64;
+        const nRef = TextLayout.computeWrap(text, FONT, bw, bh, LH, invRef, 1);
+        for (let si = 0; si < SCALE_INV.length; si++) {
+            const s = SCALE_INV[si];
+            const ns = TextLayout.computeWrap(text, FONT, bw * s, bh * s, LH, invGot, s);
+            if (ns !== nRef) { invViolations++; continue; }
+            for (let k = 0; k < nRef; k++) {
+                if (invGot[k * 4] !== invRef[k * 4] || invGot[k * 4 + 1] !== invRef[k * 4 + 1]) {
+                    invViolations++;
+                    break;
+                }
+                if (invGot[k * 4 + 2] !== invRef[k * 4 + 2] * s) { invViolations++; break; }
+            }
+        }
+    }
+    check(invViolations === 0,
+        () => 'T0 law12 scale invariance: ' + invViolations + ' violations across ' + CASES +
+            ' cases x ' + SCALE_INV.length + ' scales -- scaling the box and the scale together ' +
+            'must reproduce the s=1 partition with widths multiplied by s exactly');
 
     // Law 10 -- the sizing round trip. A buffer sized from countLines returns
     // exactly that count and never overflows. T0 is NOT a measured tier, so the

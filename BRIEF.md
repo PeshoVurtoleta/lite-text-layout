@@ -1,211 +1,276 @@
 ---
 package: "@zakkster/lite-text-layout"
-version_target: 1.1.0
+version_target: 1.2.0
 status: planned
 gc_maxMajor: 0
 gc_maxPauseMs: 4
 alloc_bytes_per_op: 0
 leak_cycles: 4096
 peers: ["@zakkster/lite-gc-profiler", "@zakkster/lite-leak"]
-findings: [TL-01, TL-02, TL-11]
-depends_on: [TL0]
-blocks: [TL2]
+findings: [TL-03, TL-04, TL-05, TL-06, TL-07, TL-08, TL-09, TL-10, TL-12, TL-13, TL-14, TL-15, TL-23, TL-24, TL-26]
+depends_on: [TL1]
+blocks: [TL3]
 ---
 
-# TL1 -- lite-text-layout v1.1.0 -- an undersized buffer must say so
+# TL2 -- lite-text-layout v1.2.0 -- NaN is not infinity, and null is not zero
 
 ## PURPOSE
 
-`computeWrap` caps the line count at `floor(outBuffer.length / 4)` and, in the
-words of its own docstring, "extra content is silently dropped." That is
-fail-OPEN: the caller gets a buffer byte-for-byte identical to a correct short
-layout, renders a truncated paragraph that looks deliberate, and has no way to
-find out. TL0 pinned that indistinguishability as an executable `knownFailing`
-entry. TL1 removes it.
+Every guard in this file is written `x > 0`, and every comparison against NaN is
+false. So `boxWidth = NaN` means "no horizontal limit", `scale = NaN` means "no
+wrapping at all", a 700-entry glyph table means "no wrapping at all AND every
+width is NaN", and `lineHeight <= 0` with `boxHeight > 0` means "truncation is
+off" while the caller believes they asked for it. None of these throws. All of
+them render. TL0 pinned thirty-five of them as executable `knownFailing`
+entries; TL2 closes the ledger to zero.
 
-Three findings close here and nothing else does. TL-01: overflow becomes
-observable via `FLAG_OVERFLOW = 2` on the last written line. TL-02: `countLines`
-gives the caller a way to size the buffer so overflow never happens. TL-11:
-`Object.freeze(TextLayout)`. Every other finding stays exactly as TL0 recorded
-it -- TL1 is not a general clean-up session and the T5 divergence count is the
-tripwire that proves it.
+They are one bug in fifteen costumes: the function trusts its arguments and
+discovers the problem in the middle of a loop, where a poisoned local has
+already defeated every downstream comparison. One door at the top closes all of
+them, and writing fifteen separate guards means writing the same door fifteen
+times in the wrong place. The door is ONE shared internal function called from
+both entry points, because `countLines` is a near-verbatim copy of
+`computeWrap`'s pass and two copies of a validator drift within one session.
 
-Two words that are not the same problem. `FLAG_TRUNCATED` means "the TEXT did
-not fit the BOX" -- a designed outcome, ellipsis included. `FLAG_OVERFLOW` means
-"the BUFFER did not fit the TEXT" -- a caller bug being reported. Do not merge
-them.
+This is the largest session in the package. Read THE ORDER before touching
+anything; three of the steps are barriers and the rest will not survive being
+done out of sequence.
 
-## PRE-FLIGHT (this is the before-side of half the assertions)
+## PRE-FLIGHT
 
-Still no `.git` in this tree. Recorded copy plus `diff`, exactly as TL0 did.
+Still no `.git` in this tree. Recorded copy plus `diff`, exactly as TL0 and TL1
+did. `timeout(1)` does not exist on this machine -- wrap long runs as
+`perl -e 'alarm 300; exec @ARGV' node --expose-gc test/torture.mjs`.
 
 ```
 SCRATCH=/private/tmp/claude-502/-Users-zakkster-Work-Portfolio-LiteLibrariesSuite-LiteTextLayout/8f441064-ff8f-43c2-839d-7b11a9dce312/scratchpad
 ```
 
 P1. `cp TextLayout.js $SCRATCH/TextLayout.js.pre` and
-    `shasum -a 256 TextLayout.js > $SCRATCH/TextLayout.js.sha.pre`. This copy is
-    the only witness the HOT PATH section has. **Overwrite the TL0-era copy --
-    the pre-side of this session is the shipped 1.0.2 file, sha
-    `555b2969c9fe44855e0941858603f20035c0f5ded68247fb34bedcd742798688`.**
-P2. `npm test 2>&1 | tee $SCRATCH/test.pre.txt`. Expect `pass 31`, `fail 0`,
-    9 suites. If it is not 31, STOP and report.
+    `shasum -a 256 TextLayout.js > $SCRATCH/TextLayout.js.sha.pre`. Overwrite the
+    TL1-era copy -- the pre-side of this session is the shipped 1.1.0 file.
+    `wc -l TextLayout.js` is `383`. This copy is the only witness the HOT PATH
+    section has.
+P2. `npm test 2>&1 | tee $SCRATCH/test.pre.txt`. Expect `pass 40`, `fail 0`,
+    10 suites. If it is not 40, STOP and report.
 P3. `npm run torture 2>$SCRATCH/torture.pre.err 1>$SCRATCH/torture.pre.out`.
-    Expect `$SCRATCH/torture.pre.out` to be exactly `ok\n` and exit 0.
-P4. Freeze the bookkeeping baseline, because silently dropping an entry is the
-    TL0 QA failure mode this session is most exposed to:
-    `grep -o 'KNOWN-FAILING -- [^ (]*\|TODO -- [^:]*' $SCRATCH/torture.pre.err | sed 's/.*-- //' | sort -u > $SCRATCH/ids.pre.txt`
-    and `grep 'known-failing=' $SCRATCH/torture.pre.err`. Expect
-    `known-failing=37 todo=9`.
-P5. Record the T5 line: `grep 'T5 cases=' $SCRATCH/torture.pre.err`. Expect
-    `cases=50000`, `divergences=40`, all classified TL-26, `unexpected=0`. That
-    40 is the "TL1 did not wander into TL2's code" tripwire. Whatever the
-    recorded number is, it is the number required after.
-P6. Copy the T6 lane-1 numbers from `$SCRATCH/tl20.pre.json` into this session's
-    notes: `verdict: 'pass'`, `source: 'gc'`, major 0, minor 0, `maxMs` 0.000,
-    `arrayBuffers` growth 0, `bytesPerCall` 0, `settled` true.
-P7. `grep -n '1\.0\.2' test/TextLayout.test.js TextLayout.d.ts llms.txt README.md package.json`
-    -- every hit is a version pin that Phase E must move to `1.1.0`.
+    `$SCRATCH/torture.pre.out` must be exactly `ok\n`, exit 0.
+P4. `grep -o 'KNOWN-FAILING -- [^ (]*\|TODO -- [^:]*' $SCRATCH/torture.pre.err | sed 's/.*-- //' | sort -u > $SCRATCH/ids.pre.txt`
+    and `grep 'known-failing=' $SCRATCH/torture.pre.err` -> `known-failing=35 todo=5`.
+P5. **Capture the labels, not just the ids.**
+    `grep 'KNOWN-FAILING' $SCRATCH/torture.pre.err | sort > $SCRATCH/labels.pre.txt`
+    -- 35 lines. This file is the ledger. LEDGER RECONCILIATION is checked
+    against it line by line, and "quietly dropped an entry" is the single
+    failure mode this session is most exposed to.
+P6. `grep 'T5 cases=' $SCRATCH/torture.pre.err` -> `cases=50000 divergences=40 (tl26=40 unexpected=0)`.
+P7. T6 lanes 1 and 2 into `$SCRATCH/tl20.pre.json`: `verdict: 'pass'`,
+    `source: 'gc'`, major 0, minor 0, `maxMs` 0.000, `arrayBuffers` growth 0,
+    `bytesPerCall` 0, `settled` true. Also record the wall time of the 20,000-op
+    lane-1 window; the door is a per-call cost and the CHANGELOG must state its
+    measured delta.
+P8. `grep -c 'FLAG_TRUNCATED' test/torture/t5-fuzz.mjs` -> `0`. That zero is the
+    inherited TL1 QA finding, and Phase B is what makes it non-zero.
+P9. **Record the atlas advances the width pins depend on**, or every width
+    assertion below is measuring the font and not the rule:
+    `node --input-type=module -e "const{FONT}=await import('./test/torture/harness.mjs');console.log(FONT.glyphs[65*7+6],FONT.glyphs[32*7+6],FONT.glyphs[13*7+6],FONT.kerning[(65<<8)|13])"`
+    Expected `12 6 0 0`. Every literal width in ASSERTIONS is derived from those
+    four numbers ('A' = 12, ' ' = 6, CR = 0, no CR kerning). If any differs,
+    recompute the literals and say so in the session notes -- do not soften the
+    assertion into an inequality.
+P10. `grep -n '1\.1\.0' TextLayout.js TextLayout.d.ts llms.txt README.md package.json test/TextLayout.test.js`
+    -- every hit is a pin Phase H moves to `1.2.0`.
 
 ---
 
-## THE OVERFLOW CONTRACT (settle this before touching the file)
+## THE ORDER
 
-**Definition, and it is the only one used anywhere in this session:**
-
-> `FLAG_OVERFLOW` is set on the last written line if and only if the same call
-> made against an unbounded buffer would have produced MORE lines. Equivalently:
-> iff `countLines(text, font, boxWidth, boxHeight, lineHeight, scale) > floor(outBuffer.length / 4)`.
-
-Everything below follows from that, and every law in ASSERTIONS tests exactly
-that sentence.
-
-### The three places the buffer-full condition is observable
-
-Line numbers are the shipped 1.0.2 file, verified: line 69 is
-`if (maxLines === 0) return 0;`, line 93 is `if (lineCount >= maxLines) break;`,
-line 217 is `if (lineCount < maxLines && lineStart < len) {`.
-
-**(A) Zero capacity -- line 69, `if (maxLines === 0) return 0;`.** No line was
-written, so there is no flags slot to put anything in. **Contract: return 0,
-unchanged, and write nothing.** The caller detects it as
-`n === 0 && typeof text === 'string' && text.length > 0`, which is documented in
-the docstring, the d.ts and llms.txt. Do NOT throw (that is TL2's door), do NOT
-return `-1` (no sentinel -- non-goal), do NOT write into a buffer of length 1..3
-(there is no whole stride and a partial write is worse than silence). This early
-return keeps its exact position and text.
-
-**(B) The loop break -- line 93, `if (lineCount >= maxLines) break;`.** This
-line does not move and does not gain a statement. Note the invariant that makes
-the cold path work: at the top of every iteration `lineStart <= i < len`
-(after a soft break `i = nextStart - 1` and `lineStart = nextStart`; after a
-hard break `lineStart = i` and the `continue` advances; after a newline
-`lineStart = i + 1` and the `continue` advances). So whenever this break fires,
-`lineStart < len` and `lineCount === maxLines`.
-
-**(C) The suppressed remainder flush -- line 217,
-`if (lineCount < maxLines && lineStart < len)`.** The flush is skipped for
-capacity reasons exactly when `lineCount >= maxLines && lineStart < len`.
-`lineCount` never exceeds `maxLines` (every in-loop increment is downstream of
-the break, the flush increment is guarded), so that is `lineCount === maxLines`.
-
-**(B) and (C) are the same post-loop condition.** That is the whole trick: one
-test, evaluated once per call, after the loop, on the cold side. The tail
-becomes
-
-```js
-if (lineStart < len) {
-    if (lineCount < maxLines) {
-        outBuffer[ptr++] = lineStart;
-        outBuffer[ptr++] = len;
-        outBuffer[ptr++] = cursorX;
-        outBuffer[ptr++] = FLAG_NORMAL;
-        lineCount++;
-    } else {
-        outBuffer[ptr - 1] = FLAG_OVERFLOW;
-    }
-}
-return lineCount;
-```
-
-`ptr === 4 * lineCount` on every path that reaches the tail (each write site
-writes exactly four slots; the two truncation sites write four and `return`
-immediately, so they never reach here), so `ptr - 1 === 4 * maxLines - 1` is the
-flags slot of the last written line, and `maxLines >= 1` here because zero
-capacity returned at (A). No new local, no new prologue byte, no per-character
-branch, and the loop body is untouched. **No `overflowed` boolean.** A flag
-variable would cost a prologue store and a store at the break site for a
-condition that is already recoverable from `lineStart`, `lineCount` and
-`maxLines`.
-
-### The truncation interaction: unreachable, and provably so
-
-The two in-loop truncation `return`s each write four slots and
-`return lineCount + 1`. At both sites the top-of-loop break has already
-guaranteed `lineCount <= maxLines - 1`, so `ptr + 4 <= 4 * maxLines`:
-**a truncation return can never overrun the buffer.** And an unbounded run takes
-identical branches (nothing in the loop reads `maxLines` except the break), so
-it also returns `lineCount + 1 <= maxLines`. By the definition above there is no
-overflow on a truncating call.
-
-Therefore `FLAG_TRUNCATED` and `FLAG_OVERFLOW` **cannot both appear in one
-call's output**. Write the precedence rule down anyway -- FLAG_OVERFLOW wins,
-because truncation is a designed outcome and overflow is a caller bug that must
-be heard -- and then assert the combination is unreachable rather than
-implementing a resolution for it. Note the one case that looks like a conflict
-and is not: if the break fires on an iteration where an unbounded run would have
-truncated, the unbounded run yields `maxLines + 1` lines, the definition says
-overflow, the code writes `FLAG_OVERFLOW`, and the caller loses the ellipsis on
-a layout that was wrong anyway. Consistent.
-
-### The prefix law (what the caller keeps)
-
-A partial layout is preserved and it is a true prefix: for capacity `m` lines,
-the output equals the first `m` lines of the unbounded run, byte-identical
-except slot `4m - 1`, which is `FLAG_OVERFLOW` when `countLines > m` and equal
-otherwise. This is why the flag beats a sentinel return -- the work is still
-usable.
-
-## THE `countLines` CONTRACT
+Fourteen findings collapsing into one door means most of the work is
+interleavable and three points are not. Barriers are absolute: do not start the
+next group until the named number is reproduced.
 
 ```
-countLines(text, font, boxWidth, boxHeight, lineHeight, scale = 1.0) -> number
+A   decision file 0002-input-door.md, all 27 rows            (no code)
+B   T5 flag tripwire, added while behaviour is UNCHANGED     -- BARRIER 1
+C   the shared door + TextLayoutError + the TL-07 early exit
+D   promote the 29 door entries and 6 documented entries     -- BARRIER 2
+E   TL-26 phantom-line fix + TL-13 CRLF, one edit, one branch
+F   promote TL-26 and TL-13 in the same commit as E          -- BARRIER 3
+G   T1/T2/T0/T6 lane 3/T7/T9 widening
+H   d.ts, llms.txt, README, docstring, tests, version, CHANGELOG
 ```
 
-Same parameters, same order as `computeWrap`, minus `outBuffer`. The
-`boxHeight`-less signature from the old roadmap is rejected: without it the
-function cannot agree with `computeWrap` on any truncating call, and agreement
-is the entire product.
+**BARRIER 1 -- the tripwire before the change.** B adds an instrument for two
+claims that TL1's QA verified by hand and left uninstrumented. Adding it AFTER
+the whitespace edits would prove only that the new code agrees with itself.
+After B: `known-failing=35 todo=5`, `divergences=40`, and the new tripwire line
+reports `flagslots=161249 badvalue=0 bothflags=0`. All three unchanged from
+pre-flight except the new line. B may not touch `TextLayout.js`.
 
-A SECOND function, not an `outBuffer === null` branch inside `computeWrap` --
-a null check per emitted line would be cheap but it makes the hot call site
-polymorphic on a parameter that is `null` for a whole class of callers. And NOT
-`computeWrap` against a scratch buffer: a scratch buffer has a capacity and
-therefore reintroduces TL-01 inside the function that exists to prevent it.
+**BARRIER 2 -- the door is complete and behaviour is otherwise frozen.** After
+D: `known-failing=1 todo=4` (only TL-26 remains), `divergences=40 (tl26=40
+unexpected=0)`, tripwire still `badvalue=0 bothflags=0`. If the divergence count
+moved during C or D, the door changed the wrapping algorithm and C is wrong.
 
-The duplication is real and it is bounded, because most of `computeWrap` is
-output machinery. Delete, do not port: `outBuffer`, `maxLines`, `ptr`, every
-`outBuffer[ptr++]`, the top-of-loop break, `lastSpaceWidth`, `dotPtr`,
-`dotAdvance`, `ellipsisWidth`, `lastSafeEllipsisIdx`, `lastSafeEllipsisWidth`
-and both `safe` expressions. **Verify before deleting the ellipsis machinery:
-`lastSafeEllipsisIdx` and `lastSafeEllipsisWidth` are written in the advance
-block and in the hard-break reseed, and read only inside the two `safe`
-ternaries -- they never influence a wrapping or truncation decision.** If that
-is not true after the coder re-reads it, keep them and say so. The two
-truncation branches collapse to `return lineCount + 1;`. Everything that decides
-where a line ends is ported verbatim: the newline branch, the advance and
-kerning, the `lastSpace` candidate, the wrap test, the space-eater, the
-hard-break reseed, and the remainder flush becomes
-`if (lineStart < len) lineCount++;`. Result is roughly 38 lines.
+**BARRIER 3 -- TL-26 and its promotion are one commit.** Fixing TL-26 takes
+`divergences` from 40 to 0, and `knownFailing('TL-26', ...)` calls `die()` the
+instant its predicate goes false ("no longer reproduces -- promote it"). E
+without F is a red suite by construction. After F: `known-failing=0 todo=2`,
+`divergences=0 (tl26=0 unexpected=0)`.
 
-Drift between the two implementations is caught by exactly one instrument, and
-it is required to be a real instrument, not a decorative one: the T0 agreement
-law, over the 512-case corpus crossed with a boxHeight sweep, plus all 50,000 T5
-cases with a per-case boxHeight. It compares `countLines(...)` against
-`computeWrap(..., OUT_BIG)` where `OUT_BIG` is `Float32Array(4 * 1024)`, and it
-additionally requires that no line of the `computeWrap` result carries
-`FLAG_OVERFLOW` -- an agreement law that compares two capped numbers is vacuous.
-The mutation proof that the law is not vacuous is T9 control 3.
+C and D are one unit per finding group and may be interleaved freely within
+themselves (door check for `scale`, then promote the four `scale` rows, then the
+next group) -- that is in fact the recommended rhythm, because it keeps the red
+window one group wide. G and H are free-order after BARRIER 3, except that T9's
+controls must be written after the mechanisms they mutate exist.
+
+---
+
+## THE DOOR CONTRACT
+
+One internal function, not exported, declared before the `TextLayout` object
+literal, called as the first statement of BOTH entry points:
+
+```
+validateInput(text, font, boxWidth, boxHeight, lineHeight, scale) -> void (throws)
+```
+
+`outBuffer` is NOT its parameter. `countLines` has no buffer, and a validator
+that takes an argument one caller cannot supply grows an `undefined` special
+case on day one. The `outBuffer` check lives in `computeWrap` alone, as one
+statement immediately after the shared call.
+
+**Error type.** `export class TextLayoutError extends Error` with
+`this.name = 'TextLayoutError'`. Exported, documented in all four surfaces. The
+message names the argument, what it received, and what is required -- the point
+of TL-09 is that `Cannot read properties of undefined (reading '324')` tells the
+caller nothing. Build the message with a template literal at throw time. **Do
+not pre-build a shared error instance**: a shared error has a shared stack and
+lies about where it came from. Error objects allocate; the throwing path is
+never measured and never hot, and no T6 lane may call it.
+
+**`instanceof Float32Array`, not duck-typing.** Fail closed on every unverified
+state. A cross-realm `Float32Array` fails `instanceof` and therefore throws;
+that is the correct answer for this library and it goes in the docstring as a
+named caveat rather than being papered over with `ArrayBuffer.isView` plus a
+constructor-name string compare.
+
+**Order of checks inside the door** -- `text`, `font`, `font.glyphs`,
+`font.kerning`, `boxWidth`, `boxHeight`, `lineHeight`, `scale`. Fixed, and
+written down, because the tests assert which message comes back for a tuple that
+is wrong in two places.
+
+### The policy table (every row lands in decisions/0002-input-door.md)
+
+| Finding | Rows | Policy | Behaviour after TL2 |
+|---|---|---|---|
+| TL-09 | 7 | A throw | `text` not a string; `font` null/undefined/missing either table |
+| TL-08 | 3 | A throw | `font.glyphs.length < 1792` or `font.kerning.length < 65536`, message names the table, the received length and the required length |
+| TL-03 | 2 | A throw | `scale` non-finite |
+| TL-04 | 2 | A throw | `scale <= 0` |
+| TL-05 | 4 | A throw | `boxWidth` non-finite or `< 0`; `0` still means no limit |
+| TL-06 | 3 | A throw | `lineHeight` non-finite always; `lineHeight <= 0` throws only when `boxHeight > 0` |
+| TL-10 | 3 | A throw | `outBuffer` not a `Float32Array` (Int32Array, Float64Array, plain Array) |
+| TL-07 | 2 | B define | `boxHeight > 0 && lineHeight * scale > boxHeight` -> return `0`, write nothing |
+| TL-24 | 1 | B define | a single glyph wider than `boxWidth` is emitted as an over-wide line, unflagged, documented |
+| TL-13 | 2 | B define | a CR immediately preceding an LF is excluded from the emitted range |
+| TL-13 | 1 | C document | a lone CR keeps its atlas advance (0 in this font) and stays inside the range |
+| TL-14 | 3 | C document | leading whitespace is preserved -- the code is right, the docstring is wrong |
+| TL-15 | 1 | C document | indices are exact to 2^24; a text longer than 16,777,216 chars is out of domain |
+| TL-12 | 0 | C document | the ellipsis allowance, stated in all four surfaces, not just d.ts |
+
+**TL-14 is the non-obvious call and it is deliberate.** Skipping leading
+whitespace at the start of the text would silently destroy indentation, and
+`'   '` -> one line of width 18 is a defensible indent line. Narrow the
+docstring's "runs of leading whitespace on the next line are skipped (no
+whitespace-only lines)" to "after a soft break" in all four surfaces. The three
+`knownFailing` rows become three named passing pins whose test names say
+DELIBERATE, so nobody "fixes" them in TL3.
+
+**TL-15 is DOCUMENT, not throw.** `startIdx`/`endIdx` are Float32 and exact only
+to 2^24. A `text.length` check at the door is one read, but a throw turns a
+legal 16 MB string -- which lays out correctly for every index below the ceiling
+-- into a hard failure. Pin the two round-trip facts by name:
+`Math.fround(16777217) === 16777216` and `Math.fround(16777219) === 16777220`.
+If the decision file argues for a throw instead, that is acceptable; leaving it
+unowned for a third session is not.
+
+**TL-23 is hygiene, not a bug.** Reset `lastSpaceWidth` alongside every
+`lastSpace = -1`, or hoist both into one reset. Three sites in `computeWrap`.
+The T5 fuzz is the only thing that proves they stay in sync; assertion 15 is the
+mutation that proves the fuzz would notice.
+
+**The aliasing todo closes as DOCUMENT.** `outBuffer` aliasing `font.glyphs` is
+possible only through a shared `ArrayBuffer`, and a `.buffer` identity check
+would reject a caller who packs disjoint views into one arena -- correct code.
+Policy: documented as caller error with undefined result, no runtime check. The
+falsifiable half is pinnable and must be pinned: a `Float32Array` and an
+`Int16Array` that are disjoint views of one `ArrayBuffer` do NOT throw.
+
+---
+
+## TL-26 -- THE EXCEPTION, CARVED ON PURPOSE
+
+The stated non-goal of this session is "no change to the wrapping algorithm
+itself -- the doors decide what enters the loop, not what the loop does".
+TL-26 is a behaviour bug inside the loop. The exception is granted, once, with
+its reason recorded in the decision file:
+
+> TL-26 is the last inhabitant of the `knownFailing` ledger, it lives in the
+> newline branch that TL-13 must edit anyway, and the alternative is two
+> sessions editing the same eight lines of the only hot loop in the package.
+> One edit to one branch is cheaper and safer than two.
+
+It does not inherit into TL3. TL3's non-goals gain "no wrapping-loop edits; TL2
+spent that budget."
+
+**The bug, exactly.** `computeWrap('AAA \nBBB', FONT, 40, 0, 16, out)` returns
+`3`: the soft break emits `[0,3,36,0]`, the space-eater stops at the `\n` and
+sets `lineStart = 4`, and the newline branch then emits `[4,4,0,0]` -- a
+zero-width phantom line -- before `[5,8,36,0]`. Forty of the 50,000 fuzz cases
+hit it.
+
+**The fix, and it must not over-suppress.** In the `id === 10` branch only, read
+`text.charCodeAt(i - 1)` ONCE into a local, compute the CR-adjusted end index
+from it, and suppress the emission when the resulting range is empty AND the
+character before `lineStart` is a space:
+
+```
+end === lineStart && lineStart > 0 && text.charCodeAt(lineStart - 1) === 32
+```
+
+Suppression means: no write, no `lineCount++`, `lineStart = i + 1`, the same
+state resets the branch already does, `continue`. It must be tested BEFORE the
+truncation sub-branch, or a phantom line can trigger a truncation return with a
+zero-length range.
+
+The `text.charCodeAt(lineStart - 1)` form (rather than the cheaper
+`prev === 32`) is required because `'AAA \r\nBBB'` reaches the newline with
+`prev === 13`, and the cheap form leaves the phantom in place for CRLF text --
+the exact intersection of the two findings this branch is being edited for.
+
+**A deliberate blank line must survive.** `'AAA\n\nBBB'` has
+`text[lineStart - 1] === 10`, not 32, so it still emits `[4,4,0,0]` and still
+returns 3. That pin is not optional; it is the whole difference between a fix
+and a regression.
+
+**The residual.** A hard break that lands on a CR could in principle satisfy the
+predicate. The arbiter is the fuzz corpus, not argument: `divergences=0
+unexpected=0` over 50,000 cases, plus a hand-written row in `t1-degenerate.mjs`.
+If a residual case appears, the oracle is the spec.
+
+**TL-13, same branch, same read.** The CR-adjusted end index is
+`(prev === 13 && i > lineStart) ? i - 1 : i`, used for the endIdx slot in both
+the truncated-fallback emit and the normal emit. The width slot stays `cursorX`
+unchanged. Both `computeWrap` and `countLines` need the change; `countLines` has
+no endIdx, so it needs only the TL-26 suppression, and the two must be edited in
+the same pass or the T0 agreement law fires immediately (which is the correct
+outcome, and assertion 15 proves it would).
+
+**Measure it.** The roadmap's escape hatch stands: this adds one `charCodeAt`
+per LINE, not per character. On the 360-char TL-20 paragraph that is a handful
+of reads per call. If T6 lane 1 moves outside noise, the CRLF half reverts to
+policy C (document, normalise upstream) and the decision file records why. The
+TL-26 half does not revert -- it is a correctness fix.
 
 ---
 
@@ -213,440 +278,473 @@ The mutation proof that the law is not vacuous is T9 control 3.
 
 ### Phase A -- the decision record, before any code
 
-**A1. `decisions/0001-flag-overflow.md`.** File: `decisions/0001-flag-overflow.md`.
-Records: the MINOR verdict with its three-point argument (value 2 is reachable
-only on a call that is already wrong today; `BitmapFont.drawWrapped` reads the
-field by equality at `../LiteBmfont/BitmapFont.js:361`, `if (flags === 1)`, so a
-2 falls through to no ellipsis, which is exactly right; the residual risk is a
-consumer whose `if/else` treats "not 0" as truncated and draws an ellipsis on an
-overflow line, which is cosmetic and confined to the already-broken case). Then
-**the counter-argument, written out, not gestured at**: the documented value
-space grew, an exhaustive `switch` over `{0, 1}` now has an unhandled arm, and
-someone will call that breaking. Then the resolution and the law it produces:
-**law 6 -- flags are a value space; compare by equality, never by truthiness.**
-Then the zero-capacity contract from (A) above and the FLAG_OVERFLOW-wins
-precedence rule with its unreachability proof.
-`decisions/` is a planning artifact and does NOT enter `files[]`.
-Check: `test -f decisions/0001-flag-overflow.md && LC_ALL=C grep -c '[^ -~\t]' decisions/0001-flag-overflow.md` prints `0`.
+**A1. `decisions/0002-input-door.md`.** One row per finding with its policy
+letter and its post-TL2 behaviour (the table above, expanded to prose). Plus:
+the TL-26 exception with its reason; the TL-14 counter-argument written out, not
+gestured at (a caller who passes user-entered text and gets an indent line they
+did not ask for); the TL-15 throw-versus-document argument with both sides; the
+aliasing policy with the arena counter-example; the cross-realm `instanceof`
+caveat; the `TextLayoutError` shape; and the LEDGER RECONCILIATION table, all 27
+rows. `decisions/` is a planning artifact and does NOT enter `files[]`.
+Check: `test -f decisions/0002-input-door.md && LC_ALL=C grep -c '[^ -~\t]' decisions/0002-input-door.md` prints `0`.
 
-### Phase B -- the source change (TL-01, TL-02, TL-11)
+### Phase B -- the tripwire (BARRIER 1, no source change)
 
-**B1. `export const FLAG_OVERFLOW = 2;`** immediately after `FLAG_TRUNCATED`,
-with a docstring stating the distinction from `FLAG_TRUNCATED` in one sentence
-and pointing at the decision record. File: `TextLayout.js:FLAG_OVERFLOW`.
-Finding: TL-01.
-Check: `node -e "import('./TextLayout.js').then(m=>process.exit(m.FLAG_OVERFLOW===2&&m.FLAG_TRUNCATED===1&&m.FLAG_NORMAL===0?0:1))"` exits 0.
+**B1. `t5-fuzz.mjs` -- the flag tripwire.** Import `FLAG_NORMAL`,
+`FLAG_TRUNCATED`, `FLAG_OVERFLOW` (P8: the file imports none of them today).
+Per case, after the existing oracle comparison, walk slots `3, 7, 11, ...` of
+the written region and count two independent violation classes: a flags value
+outside `{0, 1, 2}`, and one output carrying both a `FLAG_TRUNCATED` line and a
+`FLAG_OVERFLOW` line. Extend the T5 stderr line with
+`flagslots=<n> badvalue=<n> bothflags=<n>`. No allocation per case -- three
+module-scope counters and two module-scope booleans reset per case, no arrays,
+no `subarray`.
+File: `test/torture/t5-fuzz.mjs:run`. Finding: inherited from TL1 QA.
+Check: the line reads `flagslots=161249 badvalue=0 bothflags=0` and the rest of
+the T5 line is byte-identical to P6. 161249 is TL1's QA number; a different
+count means the walk is scanning the wrong region.
 
-**B2. The tail restructure.** Replace the flush block at lines 217-223 with the
-`if (lineStart < len) { ... } else { outBuffer[ptr - 1] = FLAG_OVERFLOW; }` form
-given in THE OVERFLOW CONTRACT, verbatim. **Nothing between line 64 and line 214
-changes.** File: `TextLayout.js:computeWrap`. Finding: TL-01.
-Check: a 3-line text into `Float32Array(4)` returns 1 with slot 3 equal to
-`FLAG_OVERFLOW`.
+**B2. `t9-controls.mjs` -- the tripwire's own control, both directions.** Extract
+B1's scan into `harness.mjs:scanFlags(buf, n)` returning a packed violation
+count, so the control cannot test a weaker predicate than the fuzz does. Feed it
+a hand-built `Float32Array(12)` whose slot 7 is `3` (must report badvalue >= 1),
+and one whose slots 3 and 11 are `FLAG_TRUNCATED` and `FLAG_OVERFLOW` (must
+report bothflags >= 1); `die` if either reports zero. Then feed it a clean
+buffer and require zero.
+File: `test/torture/t9-controls.mjs:run`, `test/torture/harness.mjs:scanFlags`.
+Check: `node --expose-gc test/torture.mjs` exits 0; neuter `scanFlags` to
+`return 0` and it exits 1. Revert.
 
-**B3. `countLines`.** Added to the `TextLayout` namespace object, **after**
-`computeWrap`, per THE `countLines` CONTRACT. Full JSDoc: same parameter list,
-the return value, and one line saying that `new Float32Array(countLines(...) * 4)`
-is the buffer size that can never overflow. File: `TextLayout.js:countLines`.
-Finding: TL-02.
-Check: `node -e "import('./TextLayout.js').then(m=>process.exit(m.TextLayout.countLines.length===5?0:1))"` exits 0 (five declared parameters; `scale` has a default and is not counted).
+### Phase C -- the door (source)
 
-**B4. `Object.freeze(TextLayout);`** as a single statement immediately after the
-namespace object literal. This is settled and pre-measured -- 50,000
-`computeWrap` calls, 87.5 ms unfrozen against 87.9 ms frozen, a 0.4% delta that
-is noise, with T6 reporting `verdict: pass` under the freeze. Do not re-measure
-it as a blocker; do run T6 after, against P6. File: `TextLayout.js`.
-Finding: TL-11.
-Check: `node -e "import('./TextLayout.js').then(m=>process.exit(Object.isFrozen(m.TextLayout)?0:1))"` exits 0.
+**C1. `TextLayoutError`.** Exported class, `name` set, one docstring paragraph.
+File: `TextLayout.js:TextLayoutError`.
+Check: `node --input-type=module -e "const m=await import('./TextLayout.js');const e=new m.TextLayoutError('x');process.exit(e instanceof Error&&e.name==='TextLayoutError'?0:1)"` exits 0.
 
-**B5. The docstring.** Delete "extra content is silently dropped." Replace with
-the overflow contract: the flag, the last-written-line rule, the zero-capacity
-`return 0` and how a caller detects it, the mutual exclusivity with
-`FLAG_TRUNCATED`, the prefix guarantee, and a pointer to `countLines`. Update
-the file-header `Flags:` line to list all three values.
-File: `TextLayout.js` (comments only).
-Check: `grep -c 'silently dropped' TextLayout.js` is 0; `grep -c 'FLAG_OVERFLOW' TextLayout.js` is >= 4.
+**C2. `validateInput`.** The shared door, per THE DOOR CONTRACT, in the fixed
+check order. Module-scope function, not on the frozen namespace.
+File: `TextLayout.js:validateInput`. Findings: TL-03..TL-06, TL-08, TL-09.
 
-### Phase C -- retire the entries this session fixes
+**C3. The two call sites.** First statement of `computeWrap` and of
+`countLines`. `computeWrap` then adds the `outBuffer instanceof Float32Array`
+check (TL-10) as its own statement.
+File: `TextLayout.js:computeWrap`, `TextLayout.js:countLines`.
 
-Every one of these six is a bomb: `knownFailing` calls `die()` when its
-predicate goes false, so B1-B4 break the suite until this phase lands.
-Doing them in one pass, listed exhaustively, is the point. Each of the six is a
-single occurrence in the current run, verified, so the arithmetic in assertion 4
-is exact.
+**C4. The TL-07 early exit.** `if (boxHeight > 0 && lineHeight * scale > boxHeight) return 0;`
+after the door in BOTH entry points. It is a `return`, not a throw, so it cannot
+live inside `validateInput` without giving the validator a return value and a
+branch at both call sites. Duplicated deliberately; G3 is what catches drift.
+File: `TextLayout.js:computeWrap`, `TextLayout.js:countLines`. Finding: TL-07.
 
-**C1. `t2-capacity.mjs` -- promote TL-01.** Delete the
-`knownFailing('TL-01 ...')` block and replace it with named passing checks,
-**both directions**:
-(a) the 10-line text into `Float32Array(12)` returns 3 and slot 11 is
-`FLAG_OVERFLOW`; (b) `'AAA BBB CCC'` into the same size returns 3 and slot 11 is
-`FLAG_NORMAL` -- an always-on flag is noise, not a fix; (c) the two buffers now
-differ, and differ **only** in slot 11; (d) the exact-fit row additionally
-asserts no slot in `0..11` equals `FLAG_OVERFLOW`; (e) the `4n+3` row returns 2
-with `partial[7] === FLAG_OVERFLOW`; (f) the oversized row keeps its untouched
-tail and gains "no line carries FLAG_OVERFLOW"; (g) capacities 0, 1, 2, 3 return
-0 **and leave a POISON-prefilled buffer bit-identical**; (h) the prefix law
-exhaustively: for the 10-line text at `boxWidth 40` and capacities `m = 1..12`,
-the `4m`-buffer output equals the first `m` lines of the `Float32Array(80)`
-output except slot `4m - 1`, which is `FLAG_OVERFLOW` for `m < 10` and
-`FLAG_NORMAL` for `m >= 10`; (i) mutual exclusivity: a truncating call
-(`boxHeight = 32, lineHeight = 16`) into a 2-line buffer returns 2, the last
-line is `FLAG_TRUNCATED`, and no slot is `FLAG_OVERFLOW`.
-File: `test/torture/t2-capacity.mjs:run`. Finding: TL-01.
-Check: `node --expose-gc test/torture.mjs 2>&1 >/dev/null | grep -c 'TL-01'` is 0 and the run exits 0.
+**C5. TL-23.** Reset `lastSpaceWidth` at all three `lastSpace = -1` sites in
+`computeWrap`. Not a live bug; three places that must stay in sync.
+File: `TextLayout.js:computeWrap`.
 
-**C2. `t0-laws.mjs` -- law 9 becomes the agreement law.** Delete the
-`check(typeof TextLayout.countLines === 'undefined', ...)` guard and the
-`todo('TL-02', ...)`. Law 9 now runs inside the existing per-case loop, over
-`BOX_HEIGHTS = [0, 16, 32, 48, 1e9]` with `LH = 16`: for each `bh`,
-`countLines(text, FONT, boxWidth, bh, LH, scale)` equals
-`computeWrap(text, FONT, boxWidth, bh, LH, OUT_BIG, scale)`, and no line of that
-`computeWrap` result carries `FLAG_OVERFLOW` (otherwise the comparison is
-vacuous -- `die` with "OUT_BIG too small, the agreement law is not measuring
-anything"). `OUT_BIG` is `Float32Array(4 * 1024)` allocated at module load.
-Law 10, new: **the sizing round trip.** `const need = countLines(...)`, then
-`computeWrap` into an exact-size `Float32Array(4 * need)` returns `need` and
-carries no `FLAG_OVERFLOW`. T0 is not a measured tier, so the per-case
-allocation is allowed here; say so in a comment so it is not copied into T6.
-Update the file-header law list from nine laws to ten.
-File: `test/torture/t0-laws.mjs:run`. Finding: TL-02.
-Check: `node --expose-gc test/torture.mjs 2>&1 >/dev/null | grep -c 'TL-02'` is 0.
+### Phase D -- promote the 35 (BARRIER 2 for the door half)
 
-**C3. `t9-controls.mjs` -- promote TL-11.** Replace
-`knownFailing('TL-11', () => Object.isFrozen(TextLayout) === false)` with
-`check(Object.isFrozen(TextLayout), ...)` plus: assignment to
-`TextLayout.computeWrap2` throws `TypeError` in strict mode (the tier is an ESM
-module, so it is already strict -- assert the throw, do not assert a silent
-no-op), and `delete TextLayout.computeWrap` throws. Keep the throwaway-object
-half of control 5 that proves the detector itself works.
-File: `test/torture/t9-controls.mjs:run`. Finding: TL-11.
-Check: `node --expose-gc test/torture.mjs 2>&1 >/dev/null | grep -c 'TL-11'` is 0.
+Each `knownFailing` whose predicate C2-C5 falsifies is a bomb: the harness
+`die()`s on a fixed bug. Promote group by group, immediately after the door
+check that fixes the group. Every promoted row becomes a named `check()` with
+the ORIGINAL reproduction as its body -- not a rewritten, easier one.
 
-**C4. `t9-controls.mjs` -- control 3, for real.** Delete
-`todo('control-3', ...)`. Build `countLinesStub = (t, f, bw, bh, lh, s) =>
-TextLayout.computeWrap(t, f, bw, bh, lh, STUB4, s)` with `STUB4` a
-`Float32Array(4)` allocated once, run the **same comparator function** the T0
-agreement law uses (extract it into `harness.mjs` as `agreeCount(fnCount, cs)`
-so control 3 cannot accidentally test a different, weaker comparison) over a
-32-case corpus that includes a case wrapping to more than one line, and `die` if
-the comparator reports zero mismatches. That is the mutation proof that the
-agreement law is not vacuous on exactly the input TL-02 exists for.
-File: `test/torture/t9-controls.mjs:run`, `test/torture/harness.mjs:agreeCount`.
-Check: temporarily raise `STUB4` to `Float32Array(4096)`; a plain
-`node --expose-gc test/torture.mjs` exits 1 with the control-3 message. Revert.
+**AR-02 applies hardest here.** "A test that names a hazard and then does not
+touch the code path where the hazard lives is worse than no test." Fifteen
+findings collapsing into one door is exactly the shape that produces a vacuous
+predicate: a test asserting that `boxWidth = NaN` throws, which passes because
+the same tuple also has a null font. **Rule: every door test starts from a
+known-good tuple that the same test first asserts does NOT throw, then varies
+EXACTLY ONE argument.** A door test without its negative half is not a test.
 
-**C5. `t9-controls.mjs` -- control 4, for real.** Delete
-`todo('control-4', ...)`. Write the overflow detector as a function of the
-buffer contents alone -- "the last written line of a capped run carries
-FLAG_OVERFLOW" -- and prove it fires by feeding it a hand-built
-`Float32Array(12)` whose slot 11 is `FLAG_NORMAL` while the corresponding
-`countLines` is 10. `die` if the detector accepts that buffer.
-File: `test/torture/t9-controls.mjs:run`.
-Check: neuter the detector to `return true`; the run exits 1. Revert.
+**D1.** `t1-degenerate.mjs` -- TL-03 (2), TL-04 (2), TL-05 (4), TL-06 (3),
+TL-07 (2). Cross every parameter with every degenerate value and pin the
+post-door answer for each: throw with a message substring, or a defined result.
+Add `lineHeight = 0, boxHeight = 0` -> does NOT throw, returns the unlimited
+layout. That row is the one that proves the `lineHeight` door is conditional and
+not blanket.
+**D2.** `t1-degenerate.mjs` -- TL-09 (7), TL-08 (3). The TL-08 message names
+`font.glyphs`, the received `700` and the required `1792`. State the mitigating
+fact in the error text and in the decision file: a real `BitmapFont` always
+allocates the full table (`../LiteBmfont/BitmapFont.js:19`,
+`new Int16Array(256 * 7)`), so this door fires for hand-rolled fonts and
+half-built atlases.
+**D3.** `t2-capacity.mjs` -- TL-10 (3), the buffer-type rows, now that they have
+a policy.
+**D4.** `t1-degenerate.mjs` -- TL-14 (3) and TL-24 (1) become passing pins named
+for the fact that the behaviour is DELIBERATE.
+**D5.** `t0-laws.mjs` -- TL-15 (1): the two `Math.fround` round-trip facts as a
+named law.
+Check after D: `node --expose-gc test/torture.mjs 2>&1 >/dev/null | grep 'known-failing='`
+-> `known-failing=1 todo=4`, and the T5 line still reads `divergences=40`.
 
-**C6. `t6-alloc.mjs` -- lane 2, for real.** Delete `todo('T6-lane2', ...)`.
-Add lane 2, strictly after lane 1 and never nested:
+### Phase E/F -- TL-26 and TL-13 (BARRIER 3, one commit)
 
-```js
-let SINK = 0;                                          // module scope
-const hot2 = () => { SINK += TextLayout.countLines(TL20_TEXT, FONT, 200, 0, 16);
-                     if (BREAK) leak.push(new Float64Array(64)); };
-const { report: r2 } = runOpsGate(hot2, { ops: 20000, warmup: 1000 });
-const { report: a2 } = runAllocGate(hot2, { iterations: 2000 });
-check(SINK > 0, () => 'T6 lane2: SINK is 0 -- the call was optimised away');
-```
+**E1.** The newline-branch edit in `computeWrap` per TL-26 -- THE EXCEPTION.
+**E2.** The matching suppression in `countLines`.
+**E3.** `t5-fuzz.mjs` -- delete `knownFailing('TL-26', ...)` and replace it with
+`check(divergences === 0, ...)`; the classifier keeps its `tl26=` counter so the
+stderr line stays comparable.
+**E4.** If the fuzz corpus generates `\r`, `oracle.mjs` gains the CRLF rule in
+this same commit and the divergence count is re-read; if it does not, say so in
+the session notes rather than assuming.
+**E5.** `t1-degenerate.mjs` -- TL-13's three rows promoted: CRLF, AAA-CRLF-BBB,
+lone CR.
+Check: `known-failing=0 todo=3`, T5 line `divergences=0 (tl26=0 unexpected=0)`.
 
-The `SINK` accumulate is a number store, not an allocation; it exists so a
-dead-code-eliminated call cannot pass as a zero-alloc call. Lane 1 keeps its
-exact TL-20 shape and its numbers are compared to `$SCRATCH/tl20.pre.json`.
-Keep `todo('T6-lane3', ...)` -- that is TL2's.
-File: `test/torture/t6-alloc.mjs:run`. Findings: TL-02, TL-20.
-Check: `node --expose-gc test/torture.mjs 2>&1 >/dev/null | grep -c 'T6-lane2'` is 0.
+### Phase G -- widen the instruments
 
-### Phase D -- widen the corpus laws (no new findings, no new fixes)
+**G1. `t6-alloc.mjs` lane 3.** Delete `todo('T6-lane3', ...)`. Lane 3 is
+doors-on-valid-input: the TL-20 paragraph with every argument exercised
+(`scale = 2`, a truncating `boxHeight = 64`, an explicit seventh argument) so the
+door's full comparison chain runs. Strictly after lanes 1 and 2, never nested --
+only one measurement in flight at a time or the profiler throws. `SINK`
+accumulate plus `check(SINK > 0, ...)`; `measureAllocs(hot3, { iterations: 2000 })`
+-- `iterations` is REQUIRED or it throws RangeError. No lane may call a throwing
+path.
+Check: `grep -c 'T6-lane3'` in the stderr is 0; `bytesPerCall === 0`.
 
-**D1. `t5-fuzz.mjs` -- agreement and sizing over all 50,000 cases.** Per case,
-after the existing oracle comparison and outside it: draw
-`bh = BOX_HEIGHTS[prng() % 5]`, assert `countLines === computeWrap(..., OUT_BIG, ...)`,
-then draw `m = 1 + (prng() % (need + 1))`, run into a fixed-capacity buffer and
-assert the prefix law plus the FLAG_OVERFLOW iff. **`OUT_BIG.subarray` allocates
-a view object per case -- use a pre-built array of 8 fixed-capacity buffers
-indexed by `m` clamped to 8 instead.** T5 is not a measured window, but the
-harness rule about per-iteration allocation still holds and a 50,000-view churn
-is exactly the shape T6 exists to forbid. **The oracle is not touched and its
-domain stays `boxHeight = 0`.**
-File: `test/torture/t5-fuzz.mjs:run`.
-Check: the T5 stderr line still reads `cases=50000 divergences=40 ... unexpected=0`.
+**G2. `t9-controls.mjs` -- four new controls, each two-direction.** A control
+that only proves the gate passes when the code is right proves nothing. For each:
+break the mechanism, observe non-zero exit; restore, observe zero; then neuter
+the control itself and observe that the broken code passes -- that is the failure
+the control exists to prevent. Take the next free indices; do NOT consume the
+index reserved by `todo('control-6', ...)`, which is TL3's, and record the
+number-to-name mapping in the file header. (The ROADMAP's TL2 line "T9 control 6
+exits non-zero" is a stale cross-reference; it is satisfied by the door control
+under whatever number it receives.)
+  - **door control:** delete the `scale` finiteness check -> exit 1 naming the
+    scale row.
+  - **shared-door control:** remove the `validateInput` call from `countLines`
+    only -> exit 1. This is the instrument that proves the door is actually
+    shared and not merely described as shared.
+  - **phantom control:** revert the TL-26 suppression -> exit 1 with
+    `divergences=40 unexpected=40`.
+  - **CRLF control:** revert the CR exclusion -> exit 1 on the CRLF pin.
 
-**D2. `t7-soak.mjs` -- countLines in the cycle.** Each of the 4096 cycles also
-calls `countLines` on the pooled text and asserts it equals the pooled expected
-line count. Nothing else changes: one reused `Float32Array(256)`, `tracker.track`
-then `tracker.untrack`, `tracker.size() === 0` after the last cycle, heap sampled
-only at cycle boundaries after `globalThis.gc()`, growth under 512 KB.
-File: `test/torture/t7-soak.mjs:run`.
-Check: the T7 stderr line still reads `cycles=4096 trackerSize=0 heapGrowthKB=<n>` with `<n> < 512`.
+**G3. `t0-laws.mjs` -- two new laws.** (a) **Scale invariance**, the single
+assertion that catches TL-03 through TL-06 at once: for `s` in `{0.5, 2, 4}`
+(powers of two ONLY -- 0.1 makes this a float-equality lottery and a flaky gate
+is worse than no gate), `computeWrap(text, FONT, bw * s, bh * s, lh, out, s)`
+yields identical line counts and identical start/end indices to the `s = 1` run,
+and each width equals `s *` the `s = 1` width exactly. (b) Extend
+`BOX_HEIGHTS` with `8` so the agreement law actually exercises C4's zero-line
+policy -- without that row the policy ships untested by the law that exists to
+catch its drift.
 
-**D3. `t8-cross.mjs` stays registered and empty.** `FLAG_OVERFLOW` conformance
-against `drawWrapped` is TL3's, because the bmfont devDependency arrives there.
-Extend the header line to say that `FLAG_OVERFLOW = 2` is inert under
-`if (flags === 1)` at `BitmapFont.js:361` and that TL3 asserts it. Keep
-`todo('TL-25', ...)`.
-File: `test/torture/t8-cross.mjs`.
-Check: `node --expose-gc test/torture.mjs 2>&1 >/dev/null | grep -c 'T8'` is >= 1.
+**G4. `t7-soak.mjs` -- the throwing path does not retain.** Each of the 4096
+cycles additionally makes one call that throws, catches it, `tracker.track`s the
+error and `tracker.untrack`s it. T7 is not a measured window so the per-cycle
+error allocation is allowed; say so in a comment so it is never copied into T6.
+Check: `cycles=4096 trackerSize=0 heapGrowthKB=<n>` with `<n> < 512`. 4096
+retained errors with their stacks would not fit under that bound, which is
+exactly why this is the right place to ask the question.
 
-### Phase E -- the public surface and the release
+**G5. `t2-capacity.mjs`** gains the aliasing pin: disjoint views of one
+`ArrayBuffer` do not throw.
 
-**E1. `test/TextLayout.test.js` -- one new describe group, exactly 9 `it(` cases**,
-named `'overflow reporting and countLines'`, appended last:
-(1) `FLAG_OVERFLOW === 2` and the three flag constants are pairwise distinct;
-(2) a 1-line buffer given 10 lines of text returns 1 with `flags === FLAG_OVERFLOW`
-on line 0; (3) TL-01 both directions, distinguishable, short text unflagged;
-(4) an exact-fit buffer carries no `FLAG_OVERFLOW`; (5) capacities 0..3 return 0
-and leave the buffer untouched; (6) `countLines` agrees on a wrapping case;
-(7) `countLines` agrees on a truncating case (`boxHeight = 32`); (8) the sizing
-round trip never overflows; (9) `Object.isFrozen(TextLayout)` is true and
-assignment throws. Total after: `pass 40`, `fail 0`, 10 suites. If any existing
-case pins `VERSION === '1.0.2'` (P7), move it to `'1.1.0'` -- do not add a tenth
-case for it.
-Check: `npm test` -> `pass 40`, `fail 0`.
+### Phase H -- the public surface and the release
 
-**E2. `TextLayout.d.ts`.** `export declare const FLAG_OVERFLOW: 2;` (literal
-type, matching however `FLAG_NORMAL` and `FLAG_TRUNCATED` are declared), the
-`countLines` signature on the namespace type, and the `LineFlag` union widened
-to `0 | 1 | 2`. Add law 6 as a doc comment.
-Check: `grep -c 'FLAG_OVERFLOW\|countLines' TextLayout.d.ts` is >= 3.
+**H1. `test/TextLayout.test.js`** -- one new describe group, exactly 14 `it(`
+cases, named `'input door, CRLF and the deliberate behaviours'`, appended last:
+(1) `TextLayoutError` exported, `instanceof Error`, name correct; (2) `text`
+12345 / null / undefined / `['A']`; (3) `font` `{}` / null / undefined;
+(4) short glyphs and short kerning; (5) `scale` NaN / Infinity / 0 / -1 throw and
+`scale = 2` works; (6) `boxWidth` -1 / -100 / NaN / -Infinity throw and `0` means
+no limit; (7) `boxHeight` NaN and negative throw, `0` means no truncation;
+(8) `lineHeight` NaN always throws, 0 and -16 throw only when `boxHeight > 0`;
+(9) `outBuffer` Int32Array / Float64Array / plain Array / undefined;
+(10) `countLines` shares the door -- same five throws, same messages, and no
+`outBuffer` check; (11) `boxHeight` under one line returns 0 and leaves the
+buffer bit-identical; (12) CRLF lays out identically to LF and a lone CR is one
+line; (13) the phantom line is gone AND the deliberate blank line survives;
+(14) leading spaces preserved, over-wide glyph emitted, the two 2^24 facts.
+Total after: `pass 54`, `fail 0`, 11 suites.
 
-**E3. `llms.txt`.** Version line to `1.1.0`; `countLines` in the API list with
-its full signature; `FLAG_OVERFLOW` in the constants; the zero-capacity
-detection rule; law 6; and the deletion of any "silently dropped" wording.
-Check: `grep -c 'countLines' llms.txt` is >= 1 and `grep -c 'silently dropped' llms.txt` is 0.
-
-**E4. `README.md`.** Constants table gains `FLAG_OVERFLOW | 2 | the BUFFER did
-not fit the TEXT`, the API section gains `countLines`, and law 6 is added. The
-full LiteSepforge-spine rebuild is TL4's -- this is a surgical edit.
-Check: `grep -c 'FLAG_OVERFLOW' README.md` is >= 2.
-
-**E5. Version sync to 1.1.0** in `package.json:version`, `TextLayout.js:VERSION`
-and `llms.txt`.
-Check: `node -e "import('./TextLayout.js').then(m=>process.exit(m.VERSION==='1.1.0'?0:1))"` exits 0 and `node -p "require('./package.json').version"` prints `1.1.0`.
-
-**E6. `CHANGELOG.md`, `## 1.1.0`.** Added: `FLAG_OVERFLOW`, `countLines`, the
-frozen namespace. Changed: the overflow contract, with the zero-capacity rule
-and the mutual-exclusivity rule stated in full. Fixed: TL-01, TL-02, TL-11,
-each moved OUT of the Known issues list -- the list shrinks by exactly three and
-that is checkable. Measured: the freeze delta (50,000 calls, 87.5 ms unfrozen vs
-87.9 ms frozen, 0.4%, noise) and the T6 lane-2 `bytesPerCall 0`, each stamped
-with `1.1.0` and the node version. Semver note: MINOR, pointing at
-`decisions/0001-flag-overflow.md`.
-Check: `grep -c 'TL-01\|TL-02\|TL-11' CHANGELOG.md` is >= 3 and the Known issues
-section no longer lists them as open.
-
-### Phase F -- close out
-
-**F1.** Re-run every command in ASSERTIONS in order into `$SCRATCH/tl1.post.txt`.
-Regenerate `$SCRATCH/ids.post.txt` by the P4 recipe and `diff` it against
-`ids.pre.txt`.
-Check: the diff removes exactly `TL-01`, `TL-02`, `TL-11`, `T6-lane2`,
-`control-3`, `control-4` and adds nothing.
+**H2. `TextLayout.d.ts`** -- `TextLayoutError`, the `@throws` tags, the 2^24
+ceiling, the TL-12 ellipsis allowance, the corrected TL-14 sentence, the CRLF
+rule, the zero-line `boxHeight` rule, the cross-realm caveat.
+**H3. `llms.txt`** -- same eight facts, version `1.2.0`.
+**H4. `README.md`** -- same eight facts, surgical edit only; the LiteSepforge
+spine rebuild is TL4's.
+**H5. The source docstring** -- same eight facts. Narrow "runs of leading
+whitespace on the next line are skipped" to "after a soft break".
+**H6. Version sync to `1.2.0`** in `package.json`, `TextLayout.js:VERSION`,
+`llms.txt`.
+**H7. `CHANGELOG.md`, `## 1.2.0`** -- Added: `TextLayoutError`, the input door.
+Changed: the fifteen policies, each with its letter. Fixed: TL-26, TL-13.
+Measured: the door's per-call delta against P7 and the T6 lane-3 `bytesPerCall
+0`, stamped with `1.2.0` and the node version. Known issues shrinks by exactly
+fourteen findings. Semver: MINOR (new export, new throws on input that was
+previously accepted and silently wrong), pointing at
+`decisions/0002-input-door.md`. The counter-argument -- "a throw where there was
+none is breaking for a caller relying on the silent path" -- is written out and
+answered: the silent path produced NaN widths and no wrapping.
 
 ---
 
 ## HOT PATH
 
-`computeWrap` is one linear pass, TL-20 proves it allocates nothing, and TL-21
-proves it reads 1.14 glyph entries per character. Both properties survive this
-session or the session failed.
+`computeWrap` is one linear pass; TL-20 proves it allocates nothing and TL-21
+proves it reads 1.14 glyph entries per character. Both survive this session or
+the session failed.
 
-- **The loop body -- lines 92 through 214 -- does not change by one byte.** Not
-  the break, not the newline branch, not the advance, not the ellipsis tracking,
-  not the wrap test, not the space-eater, not the hard-break reseed. The
-  overflow flag is written once, after the loop, at a `ptr` the function already
-  knows, under a condition assembled from locals that already exist. Bytes in a
-  hot body, not instructions: a branch that fires on one call in a thousand
-  still occupies the loop's instruction cache every iteration, so it lives
-  outside the loop.
-- **`countLines` is a separate function** so `computeWrap`'s call sites stay
-  monomorphic and its body stays identical to the shape TL-20 measured.
-- **`Object.freeze` is a one-time module-load cost.** Pre-measured at 0.4%,
-  which is noise; still confirmed by T6 against `$SCRATCH/tl20.pre.json`.
+- **Every check runs ONCE, at function entry, before the loop.** Not one new
+  branch enters the per-character body. `font.glyphs.length` and
+  `font.kerning.length` are read once at the door, never per character; the loop
+  keeps indexing the tables directly.
+- **The only permitted loop change is inside the `id === 10` branch**, which runs
+  once per line. One `charCodeAt` read into a local, reused by both the TL-26
+  suppression and the TL-13 end index.
+- Bytes in a hot body, not instructions: a branch that fires on one call in a
+  thousand still occupies the loop's instruction cache every iteration.
+- No pre-built shared error. No `try`/`catch` anywhere in either entry point.
 
-Two witnesses, because a plausible-looking diff and a stable number can each be
-wrong alone:
-
-1. Extract the FIRST loop only from each file and diff them:
+**The witness.** A `sed` line range does not work: `countLines` copies
+`computeWrap`'s loop header verbatim, so a range spans both loops. TL1 used
+`awk` with `exit` to grab the first loop; TL2 needs both, separately.
 
 ```sh
-firstloop () { awk '/^        for \(let i = 0; i < len; i\+\+\) \{$/{f=1} f{print} f&&/^        \}$/{exit}' "$1"; }
-diff <(firstloop $SCRATCH/TextLayout.js.pre) <(firstloop TextLayout.js)
+nthloop () { awk -v n="$2" '/^        for \(let i = 0; i < len; i\+\+\) \{$/{c++} c==n{print} c==n&&/^        \}$/{if(c==n)exit}' "$1"; }
+strip10 () { sed '/-- 1. Explicit newline/,/^            }$/d'; }
+
+# (a) both loops, newline branch removed -> EMPTY, both times
+diff <(nthloop $SCRATCH/TextLayout.js.pre 1 | strip10) <(nthloop TextLayout.js 1 | strip10)
+diff <(nthloop $SCRATCH/TextLayout.js.pre 2 | strip10) <(nthloop TextLayout.js 2 | strip10)
+# (b) the newline branch alone -> NON-EMPTY, both times (else nothing was fixed)
+diff <(nthloop $SCRATCH/TextLayout.js.pre 1) <(nthloop TextLayout.js 1) | grep -c '^[<>]'
 ```
 
-   produces **no output**. A plain `sed` range does NOT work here: `countLines`
-   copies `computeWrap`'s loop header verbatim, so a range match spans both
-   loops and reports the whole new function as a diff. `awk` with an `exit`
-   stops at the first loop, which is `computeWrap`'s.
-2. T6 lane 1 reproduces `$SCRATCH/tl20.pre.json` exactly.
+(a) producing output means a door check leaked into the loop. (b) producing zero
+means the `strip10` range is eating the change and (a) is vacuous. Both
+directions are required; either alone is a witness that cannot fail.
+
+The witness was exercised against the shipped 1.1.0 file while this brief was
+written: the two loop headers are at `TextLayout.js:119` and `:310`, loop 1
+extracts to 123 lines and loop 2 to 65, the two are NOT identical, and `strip10`
+removes 26 lines from loop 1. If those numbers do not reproduce at P1, the regex
+has drifted and the witness is void -- fix it before Phase C, not after.
+
+Second witness: T6 lane 1 reports `bytesPerCall === 0`, `major === 0`,
+`minor === 0`, `arrayBuffers` growth 0 against `$SCRATCH/tl20.pre.json`. The
+timing may move -- the door is real per-call work -- so lane 1's wall time is
+recorded and compared, not asserted equal: a delta above 5% on the 20,000-op
+window is a STOP-and-report, not a shrug.
 
 ---
 
 ## ASSERTIONS
 
-Each is a command with an exact expected result.
+Each is a command with an exact expected result. Widths use the P9 advances
+('A' = 12, ' ' = 6, CR = 0). Every layout literal below was EXECUTED against the
+shipped 1.1.0 file while this brief was written; the "today" values are
+measured, not remembered.
 
-1. `npm test` -> `pass 40`, `fail 0`, `suites 10`, exit 0, and no line matching
-   `torture:` in the output.
-2. `node --expose-gc test/torture.mjs 2>/dev/null | od -c | head -1` -> `o k \n`,
-   exit 0.
+1. `npm test` -> `pass 54`, `fail 0`, `suites 11`, exit 0.
+2. `node --expose-gc test/torture.mjs 2>/dev/null | od -c | head -1` -> `o k \n`, exit 0.
 3. `TEXTLAYOUT_TORTURE_BREAK=1 node --expose-gc test/torture.mjs` -> exit 1,
-   stdout empty. `node test/torture.mjs` (no `--expose-gc`) -> exit 1, stdout
-   empty.
-4. **Bookkeeping, before and after:**
-   `node --expose-gc test/torture.mjs 2>&1 >/dev/null | grep 'known-failing='`
-   -> `torture: known-failing=35 todo=5` (from 37 and 9; TL-01 and TL-11 leave
-   the known-failing set, TL-02, T6-lane2, control-3 and control-4 leave the
-   todo set, nothing else moves). Each of the six is a single occurrence today,
-   verified, so this arithmetic is exact.
-5. `diff $SCRATCH/ids.pre.txt $SCRATCH/ids.post.txt` shows exactly six removals
-   -- `TL-01`, `TL-02`, `TL-11`, `T6-lane2`, `control-3`, `control-4` -- and
-   zero additions.
-6. **The scope tripwire:**
-   `node --expose-gc test/torture.mjs 2>&1 >/dev/null | grep 'T5 cases='`
-   reports `cases=50000`, `divergences=40`, `unexpected=0`, byte-identical to
-   P5. A different number means TL1 changed whitespace or newline behaviour that
-   belongs to TL2.
-7. **The overflow law, executable:** a 1-line buffer given the 10-line text
-   returns 1 with `outBuffer[3] === 2`; `'AAA BBB CCC'` into `Float32Array(12)`
-   returns 3 with `outBuffer[11] === 0`; the two 12-slot buffers from the TL-01
-   reproduction differ in exactly one slot, index 11.
-8. **The iff, over the corpus:** across all 50,000 T5 cases, `FLAG_OVERFLOW`
-   appears on the last written line if and only if
-   `countLines(...) > floor(outBuffer.length / 4)`, 0 violations; and no single
-   output ever contains both a `FLAG_TRUNCATED` line and a `FLAG_OVERFLOW` line,
-   0 violations; and every flags slot is in `{0, 1, 2}`, 0 violations.
-9. **Agreement:** `countLines` equals `computeWrap` into `Float32Array(4096)`
-   for all 512 T0 cases crossed with `boxHeight` in `{0, 16, 32, 48, 1e9}`
-   (2,560 comparisons), for all 50,000 T5 cases, and for all 40 `node:test`
-   cases. 0 mismatches.
-10. **Sizing round trip:** `new Float32Array(countLines(...) * 4)` produces no
-    `FLAG_OVERFLOW` on any of the 50,000 fuzz cases.
-11. **GC budget:** T6 lane 1 reports `verdict: 'pass'`, `source: 'gc'`,
-    `major === 0`, `minor === 0`, `maxMs < 4` (measured 0.000),
-    `arrayBuffers` growth 0 at `ops: 20000, warmup: 1000, stabilize: 'deep'`,
-    byte-identical to `$SCRATCH/tl20.pre.json`. T6 lane 2 reports the same, plus
-    `measureAllocs(hot2, { iterations: 2000 })` -> `bytesPerCall === 0`,
-    `settled === true`, `checkAllocs(..., { maxBytesPerCall: 0 })` ->
-    `verdict: 'pass'`, `violations: []`, and `SINK > 0`.
-12. **Retention:** T7 runs 4096 cycles with `countLines` in each cycle;
-    `tracker.size() === 0` after the last cycle; `heapUsed` growth sampled at
-    cycle boundaries after `globalThis.gc()` is under 512 KB;
-    `out.buffer.byteLength` identical before and after every measured window
-    in T6.
-13. **Freeze:** `Object.isFrozen(TextLayout)` is `true`;
-    `node --input-type=module -e "const{TextLayout:T}=await import('./TextLayout.js');try{T.x=1;process.exit(1)}catch(e){process.exit(e instanceof TypeError?0:1)}"`
-    exits 0.
-14. **Controls fire.** For each of controls 3, 4 and 5, run the two-direction
-    test: break the guarded mechanism with the control armed (the run must exit
-    1), then additionally neuter the control (the run must exit 0, and that is
-    the failure the control exists to prevent). Prove control 3 by widening
-    `STUB4`, control 4 by returning `true` from the detector, control 5 by
-    removing the `Object.freeze` line. Revert each and confirm the file is
-    byte-identical afterwards.
-15. **The drift mutation:** delete the `lastSpace = -1;` reset from
-    `countLines`'s soft-break branch. `node --expose-gc test/torture.mjs` exits 1
-    naming the T0 agreement law. Revert and re-run to `ok`.
-16. **Hot path witness 1:** the `sed`/`diff` command in HOT PATH produces no
-    output.
-17. **Hot path witness 2:** `diff $SCRATCH/TextLayout.js.pre TextLayout.js`
-    shows changed hunks only in comments, the `FLAG_OVERFLOW` export, the
-    `VERSION` line, the post-loop tail block, the `countLines` method and the
-    `Object.freeze` line -- nothing else.
-18. **ASCII gate:**
-    `for f in TextLayout.js TextLayout.d.ts llms.txt README.md CHANGELOG.md test/TextLayout.test.js package.json LICENSE.txt decisions/0001-flag-overflow.md; do LC_ALL=C grep -c '[^ -~\t]' "$f"; done`
-    prints `0` nine times.
-19. **Packaging:** `npm pack --dry-run 2>&1 | grep -c 'test/'` is 0 and
-    `npm pack --dry-run 2>&1 | grep -c 'decisions/'` is 0; `CHANGELOG.md` is
-    listed once.
-20. `time node --expose-gc test/torture.mjs` completes under 120 s (TL0
-    measured 1.45 s; the new corpus work must not push it past 30 s -- if it
-    does, say so in the CHANGELOG, do not silently shrink T5).
+   stdout empty. `node test/torture.mjs` (no `--expose-gc`) -> exit 1.
+4. **The ledger:** `node --expose-gc test/torture.mjs 2>&1 >/dev/null | grep 'known-failing='`
+   -> `torture: known-failing=0 todo=2`. From 35 and 5. The two survivors are
+   `TL-25` and `control-6`, both TL3's.
+5. `diff $SCRATCH/ids.pre.txt $SCRATCH/ids.post.txt` removes exactly `TL-03`,
+   `TL-04`, `TL-05`, `TL-06`, `TL-07`, `TL-08`, `TL-09`, `TL-10`, `TL-12`,
+   `TL-13`, `TL-14`, `TL-15`, `TL-24`, `TL-26`, `T6-lane3` and the aliasing todo,
+   and **adds nothing**. A new `knownFailing` entry added by this session is a
+   REJECTED unless the decision file names its owning session.
+6. **The scope tripwire, three readings:** after B `divergences=40`; after D
+   `divergences=40`; after F `T5 cases=50000 divergences=0 (tl26=0 unexpected=0)`
+   and `badvalue=0 bothflags=0` at every one of the three.
+7. **The door, message-exact.** From the known-good tuple
+   `('AAA BBB', FONT, 100, 0, 16, out, 1)` which the same test asserts returns 1
+   without throwing, varying one argument at a time:
+   `scale = NaN` -> `TextLayoutError` whose message contains `scale` and `finite`;
+   `scale = 0` and `scale = -1` -> message contains `scale` and `> 0`;
+   `boxWidth = -100` -> contains `boxWidth` and `negative`;
+   `boxWidth = NaN` -> contains `boxWidth` and `finite`;
+   `font.glyphs = new Int16Array(700)` -> contains `font.glyphs`, `700`, `1792`;
+   `font = {}` / `null`, `text = 12345` / `null` / `['A']` -> `TextLayoutError`,
+   and the message does NOT match `/Cannot read properties/`.
+8. **The door is conditional where it says it is.**
+   `computeWrap('AAA', FONT, 0, 0, 0, out)` returns 1 and does NOT throw
+   (`lineHeight = 0` with no box height is unused);
+   `computeWrap('AAA', FONT, 0, 32, 0, out)` throws naming `lineHeight`;
+   `computeWrap('AAA BBB', FONT, 0, 0, 16, out)` returns 1 with `[0,7,78,0]`
+   (`boxWidth = 0` still means no limit; measured, unchanged).
+9. **Buffer types:** `Int32Array(16)`, `Float64Array(16)`, `new Array(16)` and
+   `undefined` each throw naming `outBuffer` and `Float32Array`; `countLines`
+   with the same five leading arguments does not throw.
+10. **TL-07:** `computeWrap('AAA', FONT, 0, 8, 16, out)` -> `0` (today it returns
+    `1` with `[0,3,36,0]`), and a POISON-prefilled buffer is bit-identical
+    afterwards. `countLines('AAA', FONT, 0, 8, 16)` -> `0` (today `1`).
+11. **TL-13:** `computeWrap('AAA\r\nBBB', FONT, 0, 0, 16, out)` -> `2` with slots
+    `[0,3,36,0, 5,8,36,0]`. Today it is `[0,4,36,0, 5,8,36,0]` -- endIdx `4`
+    puts the CR INSIDE the range, which is the bug. The LF-only control
+    `'AAA\nBBB'` is `[0,3,36,0, 4,7,36,0]` today and must not move.
+    `computeWrap('AAA\rBBB', FONT, 0, 0, 16, out)` -> `1` with `[0,7,72,0]`
+    (today, and unchanged: lone CR stays in range, zero advance). The test first
+    asserts `FONT.glyphs[13*7+6] === 0`, or the width pin is measuring the atlas.
+12. **TL-26 both directions, both measured:**
+    `computeWrap('AAA \nBBB', FONT, 40, 0, 16, out)` -> `2` with
+    `[0,3,36,0, 5,8,36,0]`; today it is `3` with `[0,3,36,0, 4,4,0,0, 5,8,36,0]`.
+    `countLines('AAA \nBBB', FONT, 40, 0, 16)` -> `2`; today `3`.
+    `computeWrap('AAA\n\nBBB', FONT, 0, 0, 16, out)` -> `3` with
+    `[0,3,36,0, 4,4,0,0, 5,8,36,0]` -- UNCHANGED from today. The deliberate blank
+    line survives because `text.charCodeAt(lineStart - 1)` is `10`, not `32`.
+    That is the discriminator the whole fix rests on, and both sides of it were
+    executed before this brief was written, not reasoned about.
+13. **TL-14 and TL-24, deliberate, all measured and all UNCHANGED:**
+    `computeWrap('   ', FONT, 0, 0, 16, out)` -> `1` with `[0,3,18,0]`;
+    `'   AAA'` -> `1` with `[0,6,54,0]`;
+    `computeWrap('A', FONT, 4, 0, 16, out)` -> `1` with `[0,1,12,0]` -- a
+    12px line in a 4px box, emitted and unflagged.
+14. **TL-15:** `Math.fround(16777217) === 16777216` and
+    `Math.fround(16777219) === 16777220` are pinned by name, and `2^24` /
+    `16777216` appears in `TextLayout.js`, `TextLayout.d.ts`, `llms.txt` and
+    `README.md` -- `grep -lc '16777216'` matches all four.
+15. **The drift mutations, one per shared mechanism.** (a) remove the
+    `validateInput` call from `countLines` -> exit 1; (b) delete one
+    `lastSpaceWidth` reset -> exit 1 naming T5 or the T0 agreement law;
+    (c) revert the TL-26 suppression in `countLines` only -> exit 1 naming the
+    agreement law. Revert each; `shasum -a 256 TextLayout.js` returns to its
+    post-session value after every one.
+16. **Scale invariance** holds across the whole T0 corpus and all 50,000 T5
+    cases for `s` in `{0.5, 2, 4}`: 0 violations.
+17. **GC budget:** all three T6 lanes report `verdict: 'pass'`, `source: 'gc'`,
+    `major === 0`, `minor === 0`, `maxMs < 4`, `arrayBuffers` growth 0 at
+    `ops: 20000, warmup: 1000, stabilize: 'deep'`, and
+    `measureAllocs(fn, { iterations: 2000 })` -> `bytesPerCall === 0`,
+    `settled === true`, with `SINK > 0` on lanes 2 and 3. Lane 1's wall time is
+    within 5% of P7.
+18. **Retention:** T7 runs 4096 cycles, each including one caught
+    `TextLayoutError`; `tracker.size() === 0` after the last cycle;
+    `heapUsed` growth sampled at cycle boundaries after `globalThis.gc()` is
+    under 512 KB (pre-flight measured 36 KB); `out.buffer.byteLength` identical
+    before and after every measured T6 window.
+19. **Controls fire, both directions**, for each of the four new controls and
+    for the `scanFlags` control: break the mechanism -> exit 1; restore -> exit
+    0; neuter the control with the mechanism still broken -> exit 0, which is
+    the failure the control exists to prevent. Revert and confirm each file is
+    byte-identical.
+20. **Hot path:** witness (a) produces no output for both loops; witness (b)
+    produces a non-zero count for both loops.
+21. **ASCII gate:**
+    `for f in TextLayout.js TextLayout.d.ts llms.txt README.md CHANGELOG.md test/TextLayout.test.js package.json LICENSE.txt decisions/0002-input-door.md; do LC_ALL=C grep -c '[^ -~\t]' "$f"; done`
+    prints `0` nine times. The attribution check is
+    `grep -l 'Karadjov' TextLayout.js TextLayout.d.ts llms.txt README.md CHANGELOG.md LICENSE.txt package.json`
+    -> no match, exit 1. **Scoped to the shipped files on purpose.** A recursive
+    `grep -rc 'Karadjov' .` matches this brief, which names the word in order to
+    forbid it, and then fails on a clean tree. TL0 shipped exactly that bug in
+    its assertion 16 and the coder was right to refuse to edit a planning doc to
+    make a grep pass. Same for the ASCII sweep: it lists files, it does not
+    recurse. `LICENSE.txt` must read `Zahary Shinikchiev`.
+22. **Packaging:** `npm pack --dry-run 2>&1 | grep -c 'test/\|decisions/\|briefs/'`
+    is 0; `CHANGELOG.md` listed once;
+    `node -p "require('./package.json').version"` prints `1.2.0` and
+    `VERSION === '1.2.0'`.
+23. `perl -e 'alarm 300; exec @ARGV' node --expose-gc test/torture.mjs`
+    completes; wall time under 30 s (TL1 measured 1.76 s). If the new corpus
+    work pushes it past 30 s, say so in the CHANGELOG -- do not silently shrink T5.
+
+---
+
+## LEDGER RECONCILIATION
+
+The arithmetic TL2 must satisfy, checked against `$SCRATCH/labels.pre.txt`:
+
+```
+35 known-failing entries at pre-flight
+-29 promoted by a code change (door throw, TL-07 return 0, CRLF, TL-26)
+     TL-03 2  TL-04 2  TL-05 4  TL-06 3  TL-07 2  TL-08 3
+     TL-09 7  TL-10 3  TL-13 2  TL-26 1
+- 6 promoted by documentation plus a pinned check, behaviour unchanged
+     TL-13 lone CR 1   TL-14 3   TL-15 1   TL-24 1
+= 0 known-failing entries remain
+
+ 5 todos at pre-flight, 3 closed (TL-12 doc, aliasing policy, T6-lane3)
+= 2 todos remain: TL-25 and control-6, both owned by TL3
+```
+
+Separately, the decision file carries a 27-row table covering `TL-01` through
+`TL-27`, each ID in exactly one of four buckets -- closed in TL0/TL1, closed
+here by code, closed here by documentation plus a pin, deferred with a named
+owning session. No ID in two buckets, no gap in the range. TL1's QA caught a
+15-versus-20 mismatch at exactly this step; the table is what makes the mismatch
+impossible to hide. **If a task in this brief cannot account for one of the 35
+labels, say so IN the session notes and stop -- do not drop it.**
 
 ---
 
 ## NON-GOALS
 
-No input validation, no thrown library error, no door of any kind -- that is
-TL2, and `countLines` inherits TL2's doors when they land rather than growing
-its own now. No sentinel return. No change to `FLAG_TRUNCATED`'s meaning or
-value. No `outBuffer === null` branch. No per-glyph anything, ever. No fix for
-**TL-26 (the phantom trailing line)** even though it lives in the newline and
-whitespace code this session reads -- it is TL2's, and assertion 6 exists to
-catch a stray fix. No TL-03..TL-10, TL-13, TL-14, TL-15, TL-24 rows change
-status. No `outBuffer` type policy (TL-10 stays `knownFailing`), no aliasing
-policy (the TL2 todo stays). No bmfont devDependency and no T8 contents (TL3).
-No README spine rebuild (TL4). No performance work on the linear pass.
+No cross-package work and no bmfont devDependency (TL3). No T8 contents; TL-25
+stays a todo. No README spine rebuild (TL4). **No change to the wrapping
+algorithm beyond the single carved exception in the `id === 10` branch** -- the
+doors decide what enters the loop, not what the loop does. No new flag value. No
+sentinel returns; the door throws or the function returns a defined result. No
+`outBuffer === null` branch. No per-glyph anything, ever. No defensive
+per-iteration progress guard in `countLines` (TL-27's comment asks the question;
+the answer is no, and the comment updates to say TL2 answered it). No
+performance work on the linear pass. No `try`/`catch` in either entry point.
 
 ---
 
 ## RISKS AND THEIR CHECKS
 
-**R1 -- the knownFailing bombs.** B1-B4 make TL-01's and TL-11's predicates
-false, and `knownFailing` `die()`s on a fixed bug. Between Phase B and Phase C
-the suite is red **by design**. Mitigation: Phase C is exhaustive and enumerated
-(C1-C6), and assertions 4 and 5 prove nothing was dropped instead of promoted.
-Do not "fix" a red suite by deleting an entry without replacing it with a
-passing assertion.
+**R1 -- the knownFailing bombs, thirty-five of them.** Between each door check
+and its promotion the suite is red by design. Mitigation: THE ORDER's group-by-
+group rhythm keeps the red window one group wide, and assertions 4 and 5 prove
+entries were promoted rather than deleted.
 
-**R2 -- a vacuous agreement law.** If `OUT_BIG` is ever too small, `countLines`
-and a capped `computeWrap` agree on the cap and the law passes while proving
-nothing. Mitigation: the law itself rejects a result carrying `FLAG_OVERFLOW`,
-and T9 control 3 (C4) reuses the identical comparator against a deliberately
-capped stub and requires a mismatch.
+**R2 -- a vacuous door test.** The dominant failure shape for this session
+(AR-02). Mitigation: the known-good-tuple rule in Phase D, and every door
+assertion in 7 and 8 carries its negative half.
 
-**R3 -- `ptr - 1` on an empty buffer.** Writing `outBuffer[ptr - 1]` when
-`ptr === 0` would write index -1, which on a `Float32Array` is a silent no-op
-and on the `Array(16)` of TL-10 creates a `"-1"` property. Mitigation: the
-`maxLines === 0` early return at line 69 makes that path unreachable, and C1(g)
-asserts capacities 0..3 leave a POISON-prefilled buffer bit-identical, which
-catches an index -1 write on the Array case too.
+**R3 -- TL-26 over-suppresses.** The predicate could eat a deliberate blank
+line. Mitigation: assertion 12's second half, the `t1-degenerate` row, and 50,000
+fuzz cases against an oracle that was written before the fix existed.
 
-**R4 -- the ellipsis machinery turns out to affect control flow.** If
-`lastSafeEllipsisIdx` does influence a branch, deleting it from `countLines`
-breaks agreement on truncating input only. Mitigation: the boxHeight sweep in
-the T0 law and the per-case `bh` in T5 make truncating input the majority of
-agreement comparisons, not an afterthought. If it fires, port the machinery back
-into `countLines` and record why in the CHANGELOG.
+**R4 -- the CRLF rule costs measurable time.** Mitigation: T6 lane 1 against P7
+with a stated 5% ceiling and a pre-agreed fallback (CRLF reverts to policy C;
+TL-26 does not).
 
-**R5 -- lane 2 measured nothing.** V8 can eliminate a call whose result is
-discarded. Mitigation: the `SINK` accumulator and its `SINK > 0` assertion in C6.
+**R5 -- the door throws inside an existing corpus.** T0/T2/T5 may feed values the
+door now rejects. Mitigation: BARRIER 2 requires the full gate green with
+`divergences=40` before TL-26 is touched, so a corpus collision surfaces while
+only one variable has moved.
 
-**R6 -- the semver argument gets relitigated mid-session.** Mitigation: Phase A
-lands before any code and carries the counter-argument, so the answer and its
-opposition are both on disk before the first edit.
+**R6 -- `countLines` and `computeWrap` drift** across a fifteen-finding edit.
+Mitigation: one shared validator, the duplicated TL-07 exit covered by the
+agreement law with `boxHeight = 8` added (G3b), and the shared-door control
+(G2) which is the only instrument that proves the sharing is real.
+
+**R7 -- the error class retains.** 4096 stacks would be visible. Mitigation: G4
+and assertion 18.
 
 ---
 
 ## DONE WHEN
 
 ```
-npm test                                                 -> 40 pass, 0 fail, 10 suites
+npm test                                                 -> 54 pass, 0 fail, 11 suites
 node --expose-gc test/torture.mjs                        -> prints exactly "ok", exit 0
 TEXTLAYOUT_TORTURE_BREAK=1 \
   node --expose-gc test/torture.mjs                      -> exits non-zero
 node --expose-gc test/torture.mjs 2>&1 >/dev/null \
-  | grep 'known-failing='                                -> known-failing=35 todo=5
+  | grep 'known-failing='                                -> known-failing=0 todo=2
 node --expose-gc test/torture.mjs 2>&1 >/dev/null \
-  | grep 'T5 cases='                                     -> cases=50000 divergences=40 unexpected=0
+  | grep 'T5 cases='                                     -> cases=50000 divergences=0 (tl26=0 unexpected=0)
+                                                            flagslots=<n> badvalue=0 bothflags=0
+node --expose-gc test/torture.mjs 2>&1 >/dev/null \
+  | grep 'T7 cycles='                                    -> cycles=4096 trackerSize=0 heapGrowthKB<512
 ```
 
-and, at the file level: an undersized buffer reports itself on the flags slot of
-its last written line and its partial layout is a true prefix; a zero-capacity
-buffer returns 0 and writes nothing, with the detection rule documented in three
-places; `countLines` exists with the full parameter list minus `outBuffer` and
-agrees with `computeWrap` on all 512 T0 cases across five box heights, all
-50,000 T5 cases and all 40 node:test cases; `Object.isFrozen(TextLayout)` is
-true and assignment throws; T6 lane 1 reproduces `$SCRATCH/tl20.pre.json` and
-lane 2 reports 0 bytes/op; T7 ends at `tracker.size() === 0` after 4096 cycles;
-`decisions/0001-flag-overflow.md` carries the MINOR verdict, its
-counter-argument, the zero-capacity contract and the precedence rule;
-`TL-01`, `TL-02` and `TL-11` are promoted to passing assertions and struck from
-the CHANGELOG's Known issues; `VERSION`, `package.json` and `llms.txt` all read
-`1.1.0`; the `computeWrap` loop body is byte-identical to its pre-flight copy.
+and, at the file level: every degenerate input either throws a `TextLayoutError`
+naming the argument and the requirement, or has a pinned documented result; one
+shared validator serves both entry points and a control proves the sharing;
+the per-character loop body is diff-identical apart from the `id === 10` branch,
+proven by both halves of the two-loop `awk` witness; the phantom line is gone and
+the deliberate blank line is not; CRLF lays out identically to LF; the 2^24
+ceiling, the ellipsis allowance, the leading-whitespace correction and the
+cross-realm caveat appear in all four documentation surfaces; 0 bytes/op on all
+three T6 lanes, measured, not assumed; `decisions/0002-input-door.md` carries all
+fifteen policies, the TL-26 exception with its reason, and the 27-row
+reconciliation; `VERSION`, `package.json` and `llms.txt` all read `1.2.0`.

@@ -4,6 +4,230 @@ All notable changes to `@zakkster/lite-text-layout` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-17
+
+`NaN` is not infinity, and `null` is not zero. Every guard in this file was
+written `x > 0`, and every comparison against `NaN` is false -- so `boxWidth =
+NaN` meant "no horizontal limit", `scale = NaN` meant "no wrapping at all", a
+700-entry glyph table meant "no wrapping AND every width is NaN", and
+`lineHeight <= 0` with `boxHeight > 0` meant "truncation is off" while the
+caller believed they had asked for it. None of them threw. All of them
+rendered. 1.1.0 shipped with thirty-five of these pinned as executable
+`knownFailing` entries in the torture gate; 1.2.0 closes that ledger to zero.
+
+They were one bug in fifteen costumes: the function trusted its arguments and
+discovered the problem in the middle of a loop, where a poisoned local had
+already defeated every downstream comparison. The fix is ONE door at the top,
+shared by both entry points, because `countLines` is a near-verbatim copy of
+`computeWrap`'s pass and two copies of a validator drift within one session.
+
+### Added
+
+- `export class TextLayoutError extends Error`, `name === 'TextLayoutError'`.
+  The message names the argument, what it received and what is required. The
+  point is that `Cannot read properties of undefined (reading '324')` raised
+  from inside the wrapping loop tells the caller nothing. Messages are built
+  with a template literal AT THROW TIME; a pre-built shared instance was
+  rejected because a shared error carries a shared stack and lies about where
+  the call came from. The throwing path allocates, is never hot, and no
+  measured window calls it.
+- **The input door.** One internal `validateInput(text, font, boxWidth,
+  boxHeight, lineHeight, scale)`, not exported and not a property of the frozen
+  namespace, called as the FIRST statement of both `computeWrap` and
+  `countLines`. `outBuffer` is deliberately not a parameter -- `countLines` has
+  no buffer, and a validator taking an argument one caller cannot supply grows
+  an `undefined` special case on day one -- so `computeWrap` checks its buffer
+  itself in one statement immediately after. Check order is fixed and part of
+  the contract: `text`, `font`, `font.glyphs`, `font.kerning`, `boxWidth`,
+  `boxHeight`, `lineHeight`, `scale`, then `outBuffer`.
+
+### Changed
+
+Fifteen findings, each with its policy letter. **A** = throw, **B** = define a
+result where there was an accident, **C** = document (the code was right).
+
+- **TL-03 (A).** `scale` non-finite throws. Was: one line of `NaN` width, no
+  wrapping.
+- **TL-04 (A).** `scale <= 0` throws. Was: `0` gave all-zero widths, `-1` gave
+  negative widths, both silently.
+- **TL-05 (A).** `boxWidth` non-finite or negative throws. `0` still means no
+  horizontal limit, and `-0` still aliases `0`.
+- **TL-06 (A).** `lineHeight` non-finite throws ALWAYS; `lineHeight <= 0`
+  throws only when `boxHeight > 0`, the one regime in which the value is read.
+  `computeWrap('AAA', font, 0, 0, 0, out)` is still legal and still returns 1.
+- **TL-07 (B).** `boxHeight > 0` with `lineHeight * scale > boxHeight` returns
+  `0` and writes nothing. Was: one line, an accident of `(lineCount + 2)`
+  requiring room for a SECOND line before truncation could fire. The boundary
+  is `>`, not `>=`.
+- **TL-08 (A).** `font.glyphs.length < 1792` or `font.kerning.length < 65536`
+  throws, naming the table, the received length and the required length. A real
+  `@zakkster/lite-bmfont` `BitmapFont` always allocates the full table, so this
+  door fires for hand-rolled fonts and half-built atlases, not the happy path.
+- **TL-09 (A).** `text` not a string, and `font` null/undefined/missing either
+  table, throw. Was: `text = 12345` returned `0` silently (a number has no
+  `.length`, so the loop never ran), and `font = {}` raised a raw `TypeError`
+  naming an internal offset.
+- **TL-10 (A).** `outBuffer` must be a `Float32Array`. Was: a plain `Array` and
+  a `Float64Array` were accepted, and an `Int32Array` silently truncated every
+  `lineWidth` to its integer part. The check is `instanceof`, so a CROSS-REALM
+  `Float32Array` is rejected -- deliberately, since the alternative accepts
+  anything that renames its constructor. Named as a caveat in all four surfaces.
+- **TL-12 (C).** A truncated line's `lineWidth` includes the ellipsis
+  allowance. Behaviour unchanged; it was stated only in the `.d.ts` and is now
+  in the source docstring, `llms.txt` and `README.md` too.
+- **TL-14 (C).** Leading whitespace is preserved at the start of the text and
+  after an explicit `\n`; it is skipped only AFTER A SOFT BREAK. The code was
+  right and the docstring was too broad. Narrowed in all four surfaces.
+  Skipping it would silently destroy indentation, and a library cannot tell an
+  accidental indent from a deliberate one.
+- **TL-15 (C).** `startIdx`/`endIdx` are Float32 and exact only to
+  2^24 = 16777216. Documented, not thrown: the ceiling is a property of the
+  OUTPUT FORMAT, not the input, and a 16 MB string lays out correctly for every
+  index below it. Pinned by `Math.fround(16777217) === 16777216` and
+  `Math.fround(16777219) === 16777220`.
+- **TL-23 (hygiene).** `lastSpaceWidth` is now reset alongside every
+  `lastSpace = -1` -- three sites in `computeWrap`. Not a live bug: the stale
+  value is read only when `lastSpace !== -1`, so no output can observe it. The
+  three sites simply have to stay in sync.
+- **TL-24 (B).** A single glyph wider than `boxWidth` is emitted as an
+  over-wide line, unflagged, and that is now documented. "At least one glyph
+  per line" is what makes the loop terminate.
+- **Aliasing (C).** An `outBuffer` overlapping `font.glyphs` through a shared
+  `ArrayBuffer` is caller error with an undefined result, with NO runtime
+  check. A `.buffer` identity check would reject a caller packing DISJOINT
+  views into one arena, which is correct code -- pinned as a passing test.
+
+### Fixed
+
+- **TL-26 -- the phantom line.** `computeWrap('AAA \nBBB', font, 40, 0, 16,
+  out)` returned `3`: the soft break emitted `[0,3,36,0]`, the space-eater
+  stopped at the `\n` and set `lineStart = 4`, and the newline branch then
+  emitted `[4,4,0,0]` -- a zero-width line with no content. Now `2`. The
+  discriminator is the character BEFORE `lineStart`: `32` means the space-eater
+  put us there (suppress), `10` means the author wrote a blank line (keep). A
+  DELIBERATE blank line survives: `'AAA\n\nBBB'` still returns `3` with its
+  `[4,4,0,0]`. Forty of the 50,000 differential-fuzz cases hit this; the count
+  is now `0` with the oracle unchanged.
+- **TL-26 corollary, found by the fuzz during this session.** The buffer-cap
+  `break` can fire on the very iteration that would have suppressed a phantom,
+  leaving `lineStart` parked on a newline that consumes itself. Left alone, a
+  capped run reported `FLAG_OVERFLOW` where the unbounded run had nothing more
+  to write, breaking the 1.1.0 iff (`FLAG_OVERFLOW` <=> `countLines(...) >
+  capacity`). The newline is now consumed on the cold flush path, once per
+  call. At most one terminator can qualify.
+- **TL-13 -- CRLF.** A `\r` immediately preceding a `\n` is a line terminator
+  and is excluded from the emitted range. `computeWrap('AAA\r\nBBB', font, 0,
+  0, 16, out)` now gives `[0,3,36,0, 5,8,36,0]`; it gave `[0,4,36,0, ...]`,
+  putting the CR INSIDE a range whose `lineWidth` excluded it, so a renderer
+  walking `[start, end)` drew a character the width did not account for. A LONE
+  `\r` is NOT a terminator: it keeps its atlas advance and stays in range.
+  The exclusion applies to **all three emitting arms** of the newline branch --
+  the normal emit and BOTH sub-arms of the truncation return. The truncating arm
+  cuts at `lastSafeEllipsisIdx + 1`, which equals the newline index when the CR
+  is the last position where content-plus-ellipsis fits, so it is clamped to the
+  CR-adjusted end. And because the CR leaves the RANGE, its advance leaves the
+  WIDTH: `lineWidth` has the CR's glyph advance and its kerning pair subtracted,
+  or the documented "range and `lineWidth` agree" would be false in any atlas
+  where glyph 13 is not zero-advance.
+- **Scope of the CRLF identity, stated rather than implied.** CRLF lays out
+  identically to LF -- same line count, same widths, start indices shifted by
+  one -- whenever the CR's own advance does not force a wrap. That is always
+  true for a real bitmap atlas, where a CR is not a printable glyph and its
+  advance is `0`. In a hand-rolled atlas that gives glyph 13 a non-zero advance
+  AND a `boxWidth` narrow enough for it to matter, the CR hard-breaks onto its
+  own line in the wrap test, before the newline branch is ever reached, and no
+  line-count identity is possible without teaching the per-character body about
+  CRs -- which the hot-path law forbids. 1.2.0 is still strictly better than
+  1.1.0 out there: the CR is no longer inside an emitted range. Pinned by name
+  in `t1-degenerate.mjs`, both sides of the boundary.
+
+Both fixes live in the same `id === 10` branch and share ONE `charCodeAt` read.
+Editing that branch was a deliberate, once-only exception to "no changes to the
+wrapping algorithm", recorded with its reasoning in
+`decisions/0002-input-door.md`: the alternative was two sessions editing the
+same eight lines of the only hot loop in the package.
+
+### Measured
+
+Node v26.3.1, darwin arm64, `@zakkster/lite-gc-profiler`, all numbers from this
+release's gate run.
+
+- **Allocation: 0 bytes/op on all three T6 lanes.** Lane 1 (`computeWrap` over
+  the 360-char paragraph), lane 2 (`countLines`), lane 3 (NEW -- doors on valid
+  input: an explicit `scale = 2`, a truncating `boxHeight = 64`, the seventh
+  argument supplied, so the door's full comparison chain runs).
+  `measureOps(fn, { ops: 20000, warmup: 1000, stabilize: 'deep' })` ->
+  `verdict: pass`, `source: gc`, major `0`, minor `0`, `maxMs` `0.000`,
+  `arrayBuffers` growth `0`. `measureAllocs(fn, { iterations: 2000 })` ->
+  `bytesPerCall: 0`, `settled: true`. No lane calls a throwing path: error
+  construction allocates by design, and measuring it would gate a cost the
+  contract deliberately accepts.
+- **The door's per-call cost.** On a 7-character string
+  (`computeWrap('AAA BBB', font, 100, 0, 16, out, 1)`, 2,000,000 iterations,
+  median of 3 runs, interleaved against the 1.1.0 file in one process):
+  **24.2 ns -> 29.0 ns, a delta of roughly +4 ns per call.** Two independent
+  runs of this shape measured +4.8 ns and +3.84 ns; run-to-run spread is around
+  15%, so one significant figure is all the method supports and the honest
+  claim is "a few nanoseconds", not a two-decimal figure. That is the eight
+  comparisons, two `.length` reads and one `instanceof`, and it is a FIXED cost
+  paid once per call regardless of text length. The CRLF work adds nothing to
+  it: the CR advance and its kerning pair are read only when a CR actually
+  precedes the newline, inside a branch that already runs once per LINE.
+- **T6 lane 1 wall time, against the 1.1.0 baseline.** Five interleaved
+  20,000-op windows each: 1.1.0 median **36.45 ms**, 1.2.0 median
+  **36.34 ms** -- a delta of **-0.3%**, i.e. no regression. Run-to-run spread on
+  this window is roughly +/-10%, so the honest reading is "within noise": the
+  door's few ns is amortised to nothing across a 360-character paragraph, and
+  the TL-20 text contains no `\r`, so the CRLF branch never fires there. The
+  pre-agreed +5% ceiling was not approached, so the CRLF half did NOT revert to
+  policy C.
+- **Retention.** T7 runs 4096 cycles, each now including one caught
+  `TextLayoutError`: `trackerSize=0`, `heapGrowthKB=36` against a 512 KB bound.
+  4096 retained errors with their stacks could not fit under that bound, which
+  is why the throwing path is asked the question there and nowhere else.
+- **Differential fuzz.** `T5 cases=50000 divergences=0 (tl26=0 unexpected=0)`,
+  from `divergences=40 (tl26=40)` in 1.1.0. The oracle was not touched.
+- **The flags tripwire (new).** `flagslots=157820 badvalue=0 bothflags=0`. It
+  walks the flags slots of every capped run and counts two independent
+  violation classes: a value outside `{0, 1, 2}`, and one output carrying both
+  a `FLAG_TRUNCATED` and a `FLAG_OVERFLOW` line. It was added BEFORE any
+  behaviour change, and read `flagslots=161249 badvalue=0 bothflags=0` against
+  the unmodified 1.1.0 file. **The 3429-slot drop is fully accounted for and no
+  fuzz case was rejected by the door (0 throws in 50,000 cases):** 3427 cases
+  draw the single combination `boxHeight = 16, scale = 2`, where
+  `lineHeight * scale = 32 > 16` and TL-07 now returns `0` lines; 3417 of them
+  previously contributed exactly one flags slot each (1.1.0's truncation fired
+  on the first break, returning 1) and 10 had empty text and contributed none,
+  giving `161249 - 3417 = 157832` after the door. The remaining 12 slots are
+  phantom lines removed by TL-26 from inside capped prefixes:
+  `157832 - 12 = 157820`. The corpus did not shrink; one truncation regime
+  legitimately stopped producing lines.
+- **The gate.** `known-failing=0 todo=2` (from `35` and `5`). The two survivors
+  are `TL-25` and `control-6`, both owned by the next session. `npm test`: 54
+  pass, 11 suites, 0 fail. Full torture run: ~2 s.
+
+### Semver
+
+MINOR. A new export, and new throws on input that was previously accepted and
+silently wrong.
+
+**The counter-argument, stated plainly:** a throw where there was none is
+breaking for a caller relying on the silent path.
+
+**The answer:** the silent path produced `NaN` widths and no wrapping. There is
+no caller relying on `scale = NaN` returning one line of `NaN` width; there is
+only a caller who has not noticed yet. A minor bump with a loud entry and a
+named error class is the shortest path from "silently wrong" to "loudly
+correct". Full reasoning, including every rejected alternative, in
+`decisions/0002-input-door.md`.
+
+### Known issues
+
+Shrinks by fourteen findings. What remains: **TL-22** (the README does not
+follow the suite blueprint spine) and **TL-25** (cross-package double-scale --
+`BitmapFont.drawWrapped` computes alignment as `boxWidth - lineWidth * scale`
+while `lineWidth` is already at the rendered scale).
+
 ## [1.1.0] - 2026-08-17
 
 An undersized buffer must say so. TL1 makes overflow observable, gives callers a

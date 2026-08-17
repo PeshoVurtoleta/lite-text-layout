@@ -31,7 +31,6 @@ import {
     runAllocGate,
     check,
     die,
-    todo,
 } from './harness.mjs';
 
 const OPS = 20000;
@@ -48,8 +47,6 @@ const out = new Float32Array(256);
 let SINK = 0;
 
 export function run() {
-    todo('T6-lane3', 'doors-on-valid-input zero-alloc gate -- lands in TL2');
-
     const hot = () => {
         TextLayout.computeWrap(TL20_TEXT, FONT, 200, 0, 16, out);
         if (BREAK) leak.push(new Float64Array(64));
@@ -108,5 +105,41 @@ export function run() {
     if (a2.verdict !== 'pass') {
         die('T6 lane2 alloc gate rejected -- verdict=' + a2.verdict +
             ' bytesPerCall=' + allocs2.bytesPerCall + ' settled=' + allocs2.settled);
+    }
+
+    // -- Lane 3 (TL2): the DOORS on valid input. The input door added in 1.2.0
+    // runs eight comparisons and two `.length` reads before the loop, on every
+    // single call. Lanes 1 and 2 barely exercise it: boxHeight 0 short-circuits
+    // the conditional lineHeight rule and the default scale skips the seventh
+    // argument entirely. Lane 3 drives the FULL comparison chain -- an explicit
+    // scale, a truncating boxHeight, and the seventh argument supplied -- so a
+    // door that allocates (a template literal built eagerly, a shared options
+    // object, an array of check names) is caught here and nowhere else.
+    //
+    // Strictly AFTER lanes 1 and 2, never nested: the profiler measures one
+    // window at a time. NO LANE MAY CALL A THROWING PATH -- error construction
+    // allocates by design, and measuring it would gate a cost the contract
+    // deliberately accepts. Every argument below is VALID.
+    const hot3 = () => {
+        SINK += TextLayout.computeWrap(TL20_TEXT, FONT, 200, 64, 16, out, 2);
+        if (BREAK) leak.push(new Float64Array(64));
+    };
+
+    const bufBytes3 = out.buffer.byteLength;
+    const { report: r3, summary: s3 } = runOpsGate(hot3, { ops: OPS, warmup: WARMUP });
+    const { report: a3, allocs: allocs3 } = runAllocGate(hot3, { iterations: ITERATIONS });
+
+    check(SINK > 0, () => 'T6 lane3: SINK is 0 -- the doors-on-valid-input call was optimised away');
+    check(out.buffer.byteLength === bufBytes3,
+        () => 'T6 lane3: out buffer backing store grew ' + bufBytes3 + ' -> ' + out.buffer.byteLength);
+
+    if (!r3.ok) {
+        const g = s3.gc;
+        die('T6 lane3 ops gate rejected -- verdict=' + r3.verdict + ' source=' + s3.source +
+            ' major=' + g.major + ' minor=' + g.minor + ' maxMs=' + g.maxMs.toFixed(3));
+    }
+    if (a3.verdict !== 'pass') {
+        die('T6 lane3 alloc gate rejected -- verdict=' + a3.verdict +
+            ' bytesPerCall=' + allocs3.bytesPerCall + ' settled=' + allocs3.settled);
     }
 }

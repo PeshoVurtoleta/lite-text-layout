@@ -19,7 +19,22 @@ export const FLAG_TRUNCATED: 1;
 export const FLAG_OVERFLOW: 2;
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION: '1.1.0';
+export const VERSION: '1.2.0';
+
+/**
+ * Thrown by both entry points when an argument fails the input door (1.2.0).
+ *
+ * The message names the argument, what it received and what is required --
+ * `Cannot read properties of undefined (reading '324')` from inside the
+ * wrapping loop told the caller nothing. Before 1.2.0 none of these threw:
+ * `boxWidth = NaN` silently meant "no horizontal limit", `scale = NaN` silently
+ * disabled wrapping, and a short glyph table silently made every width `NaN`.
+ * See decisions/0002-input-door.md.
+ */
+export class TextLayoutError extends Error {
+    name: 'TextLayoutError';
+    constructor(message: string);
+}
 
 /**
  * One of the three flag values written into the layout buffer.
@@ -49,11 +64,15 @@ export interface BitmapFontData {
  * runtime, not an array of objects.
  */
 export interface LayoutLine {
-    /** Start char index into `text` (inclusive). */
+    /** Start char index into `text` (inclusive). Exact to 2^24 = 16777216. */
     startIdx: number;
-    /** End char index into `text` (exclusive). */
+    /** End char index into `text` (exclusive). Exact to 2^24 = 16777216. */
     endIdx: number;
-    /** Pixel width of the line, including any ellipsis allowance. */
+    /**
+     * Pixel width of the line. For a {@link FLAG_TRUNCATED} line this INCLUDES
+     * the three-dot ellipsis allowance, so it measures wider than the glyphs in
+     * `[startIdx, endIdx)`.
+     */
     lineWidth: number;
     /** {@link FLAG_NORMAL}, {@link FLAG_TRUNCATED} or {@link FLAG_OVERFLOW}. */
     flags: LineFlag;
@@ -73,6 +92,27 @@ export const TextLayout: {
      * it as `n === 0 && text.length > 0`. Use {@link countLines} to size a buffer
      * that can never overflow.
      *
+     * Wrapping notes that surprise callers:
+     * - Leading whitespace is skipped ONLY AFTER A SOFT BREAK. At the start of
+     *   the text, and immediately after an explicit `\n`, it is CONTENT:
+     *   `'   '` is one line of width `3 * space`, not an empty layout.
+     * - A `\r` immediately preceding a `\n` is a line terminator and is
+     *   EXCLUDED from the emitted range, so range and `lineWidth` agree. A LONE
+     *   `\r` is not a terminator: it stays in range with its atlas advance.
+     *   CRLF lays out identically to LF whenever the CR's own advance does not
+     *   force a wrap -- always true for a real atlas, where a CR is not a
+     *   printable glyph. A hand-rolled atlas giving glyph 13 a non-zero advance
+     *   in a box narrow enough to wrap on it is out of contract; the CR is
+     *   still never inside an emitted range.
+     * - A single glyph wider than `boxWidth` is emitted as an OVER-WIDE line,
+     *   unflagged. One glyph per line is what makes the loop terminate.
+     * - A truncated line's `lineWidth` INCLUDES the three-dot ellipsis
+     *   allowance, so a `FLAG_TRUNCATED` line measures wider than its range.
+     * - `boxHeight > 0` with `lineHeight * scale > boxHeight` returns `0` and
+     *   writes NOTHING: a box that cannot hold one line holds no lines.
+     * - `startIdx`/`endIdx` are Float32 slots, exact only to 2^24 = 16777216.
+     *   A longer text is out of domain.
+     *
      * @param text        Source string.
      * @param font        Object exposing the flat glyph/kerning tables; a
      *                    `BitmapFont` instance works.
@@ -81,8 +121,17 @@ export const TextLayout: {
      *                    (no truncation will ever be emitted).
      * @param lineHeight  Line advance in px (at scale=1), usually `font.lineHeight`.
      * @param outBuffer   Pre-allocated `Float32Array`, length >= `lineCount * 4`.
-     * @param scale       Font scale multiplier applied to all widths. Defaults to `1`.
-     * @returns           Number of lines written.
+     * @param scale       Font scale multiplier applied to all widths. Finite and
+     *                    `> 0`. Defaults to `1`.
+     * @returns           Number of lines written. `0` when the box cannot hold one line.
+     * @throws {TextLayoutError} `text` is not a string; `font` is missing or
+     *   `font.glyphs` / `font.kerning` is shorter than 1792 / 65536; `boxWidth`
+     *   or `boxHeight` is non-finite or negative; `lineHeight` is non-finite,
+     *   or `<= 0` while `boxHeight > 0`; `scale` is non-finite or `<= 0`;
+     *   `outBuffer` is not a `Float32Array`. The check is `instanceof`, so a
+     *   CROSS-REALM `Float32Array` (a `vm` context, an iframe) is rejected --
+     *   deliberately, since the alternative accepts anything that renames its
+     *   constructor. Copy into a same-realm view.
      */
     computeWrap(
         text: string,
@@ -104,8 +153,12 @@ export const TextLayout: {
      * @param boxWidth    Container width in px. `0` = no horizontal limit.
      * @param boxHeight   Container height in px. `0` = no vertical limit.
      * @param lineHeight  Line advance in px (at scale=1).
-     * @param scale       Font scale multiplier. Defaults to `1`.
+     * @param scale       Font scale multiplier. Finite and `> 0`. Defaults to `1`.
      * @returns           Number of lines an unbounded `computeWrap` would write.
+     *                    `0` when the box cannot hold one line.
+     * @throws {TextLayoutError} The SAME door as {@link computeWrap}, through
+     *   the same shared validator and with the same messages -- minus the
+     *   `outBuffer` check, which has no argument to check here.
      */
     countLines(
         text: string,

@@ -66,6 +66,26 @@ export function run() {
         const obj = { cycle: i };
         const handle = tracker.track(obj, NOOP, 'soak');
         tracker.untrack(handle);
+
+        // TL2 (G4) -- the THROWING path must not retain. One rejected call per
+        // cycle: catch the TextLayoutError, track it, untrack it, drop it. 4096
+        // retained errors with their stacks could not fit under the 512 KB
+        // bound below, which is exactly why this is the right place to ask.
+        //
+        // T7 IS NOT A MEASURED WINDOW. The per-cycle Error allocation is
+        // deliberate and allowed HERE ONLY -- never copy this shape into T6,
+        // where no lane may call a throwing path.
+        let caught = null;
+        try {
+            TextLayout.computeWrap(texts[idx], FONT, BOXW, 0, 16, out, NaN);
+        } catch (err) {
+            caught = err;
+        }
+        check(caught !== null && caught.name === 'TextLayoutError',
+            () => 'T7: cycle ' + i + ' the door did not reject scale=NaN');
+        const eHandle = tracker.track(caught, NOOP, 'soak-error');
+        tracker.untrack(eHandle);
+        caught = null;
         check(nLines === expected[idx],
             () => 'T7: cycle ' + i + ' text ' + idx + ' lines ' + nLines + ' != ' + expected[idx]);
         check(cLines === expected[idx],

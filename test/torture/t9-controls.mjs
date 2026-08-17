@@ -20,16 +20,38 @@
  *   - Control 5 (TL1): the freeze detector. TextLayout IS frozen now (TL-11
  *     promoted); assignment and delete throw. The detector itself is still proven
  *     by freezing a throwaway object and asserting a strict-mode write throws.
+ *   - Control 8 (TL2): the flags tripwire. `harness.scanFlags` -- the SAME scan
+ *     T5 runs over every capped run -- must report a bad flags value and must
+ *     report a both-flags output, and must report neither on a clean buffer.
  *
- * Deferred, registered as todo with their session:
- *   - Control 6: double-scaled width -- TL3.
+ * NUMBER-TO-NAME MAPPING. Index 6 is RESERVED for TL3 (double-scaled width) and
+ * is deliberately skipped, and 7 is the whole-suite BREAK control, so TL2's
+ * controls start at 8:
+ *
+ *     1 alloc gate            2 oracle comparator       3 agreement law
+ *     4 overflow detector     5 freeze detector         6 RESERVED -- TL3
+ *     7 TEXTLAYOUT_TORTURE_BREAK (whole-suite, out of process)
+ *     8 flags tripwire        9 the input door         10 the SHARED door
+ *    11 the phantom line     12 the CRLF exclusion
+ *
+ * Controls 9 to 12 gate mechanisms that live in TextLayout.js, which this
+ * process cannot edit. Each one therefore feeds the SHARED detector the real
+ * tier uses (never a private weaker copy) with an input that simulates the
+ * mechanism being broken, and requires the detector to report. The
+ * out-of-process half -- actually deleting the mechanism from the source and
+ * observing exit 1 -- is the session's drift-mutation procedure, recorded in
+ * decisions/0002-input-door.md and in the session notes; these controls are
+ * what make that procedure's DETECTORS provably non-vacuous.
  *
  * The whole-suite control is Control 7: TEXTLAYOUT_TORTURE_BREAK=1, which trips
  * the T6 alloc gate and exits non-zero.
  */
 
-import { TextLayout, FLAG_OVERFLOW, FLAG_NORMAL } from '../../TextLayout.js';
-import { SEED, FONT, runOpsGate, check, die, todo, makePrng, makeCorpus, agreeCount } from './harness.mjs';
+import { TextLayout, FLAG_OVERFLOW, FLAG_NORMAL, FLAG_TRUNCATED } from '../../TextLayout.js';
+import {
+    SEED, FONT, runOpsGate, check, die, todo, makePrng, makeCorpus, agreeCount,
+    scanFlags, doorMisses, DOOR_ROWS, countPhantoms, crlfInRange,
+} from './harness.mjs';
 import { oracleWrap } from './oracle.mjs';
 import { linesDiverge } from './t5-fuzz.mjs';
 
@@ -38,6 +60,9 @@ const STUB4 = new Float32Array(4);
 
 /** Retained sink so the control's allocations survive GC (arrayBuffers grows). */
 const leak = [];
+
+/** Scratch buffer for the door controls. Never measured, allocated once. */
+const CTRL_OUT = new Float32Array(4 * 64);
 
 export function run() {
     // Control 1 -- the alloc gate. A hot body that retains an allocation every
@@ -132,6 +157,126 @@ export function run() {
     try { throwaway.x = 2; } catch (err) { threw = true; }
     check(threw,
         () => 'T9 control 5: assignment to a frozen object did not throw -- the freeze detector is blind');
+
+    // Control 8 (TL2) -- the flags tripwire. T5 walks every capped run through
+    // harness.scanFlags and reports badvalue/bothflags; a scan that cannot
+    // report is a decorative counter. Gate it on hand-built buffers, both
+    // violation classes independently, plus the clean direction.
+    const badBuf8 = new Float32Array(12);
+    badBuf8[7] = 3;                       // one slot outside {0, 1, 2}
+    const badV = scanFlags(badBuf8, 3);
+    if ((badV >> 1) < 1) {
+        die('T9 control 8: scanFlags reported ' + (badV >> 1) + ' bad values for a buffer whose ' +
+            'slot 7 holds 3 -- the T5 badvalue counter cannot fire');
+    }
+    const bothBuf8 = new Float32Array(12);
+    bothBuf8[3] = FLAG_TRUNCATED;
+    bothBuf8[11] = FLAG_OVERFLOW;
+    const bothV = scanFlags(bothBuf8, 3);
+    if ((bothV & 1) !== 1) {
+        die('T9 control 8: scanFlags did not report an output carrying both FLAG_TRUNCATED and ' +
+            'FLAG_OVERFLOW -- the T5 bothflags counter cannot fire');
+    }
+    // The two classes are independent: the both-flags buffer holds no bad value.
+    check((bothV >> 1) === 0,
+        () => 'T9 control 8: scanFlags counted a bad value in a buffer holding only legal flags');
+    // Clean direction: an always-true scan would make every T5 case a violation.
+    const cleanBuf8 = new Float32Array(12);
+    cleanBuf8[3] = FLAG_NORMAL;
+    cleanBuf8[7] = FLAG_NORMAL;
+    cleanBuf8[11] = FLAG_TRUNCATED;       // legal on its own
+    check(scanFlags(cleanBuf8, 3) === 0,
+        () => 'T9 control 8: scanFlags reported a violation on a clean buffer (always-true scan)');
+
+    // Control 9 (TL2) -- THE INPUT DOOR. The detector is harness.doorMisses,
+    // the same one T1 requires to report 0 against both entry points. Feed it a
+    // call that simulates the `scale` finiteness check having been DELETED --
+    // it intercepts a non-finite scale and returns a line count instead of
+    // letting the door throw, which is exactly what 1.1.0 did -- and the
+    // detector must report the scale rows.
+    const doorMissingScale = (t, f, bw, bh, lh, s) => {
+        if (!Number.isFinite(s)) return 1;   // the deleted check, simulated
+        return TextLayout.computeWrap(t, f, bw, bh, lh, CTRL_OUT, s);
+    };
+    const missScale = doorMisses(doorMissingScale, 'control9-missing-scale-check');
+    if (missScale < 2) {
+        die('T9 control 9: doorMisses reported ' + missScale + ' misses against a door with the ' +
+            'scale finiteness check removed -- expected at least the 2 non-finite scale rows. ' +
+            'The door detector is vacuous and T1 would pass on a doorless build.');
+    }
+    // The clean direction, so an always-true detector cannot survive either:
+    // the REAL computeWrap must report zero misses through the same detector.
+    check(doorMisses((t, f, bw, bh, lh, s) => TextLayout.computeWrap(t, f, bw, bh, lh, CTRL_OUT, s),
+        'control9-real') === 0,
+        () => 'T9 control 9: the real computeWrap reports door misses -- the door regressed');
+
+    // Control 10 (TL2) -- THE DOOR IS SHARED. This is the only instrument that
+    // proves `countLines` goes through the same validator rather than merely
+    // being described as doing so. A countLines with no door does not throw at
+    // all, so simulate its absence by swallowing every rejection; the detector
+    // must then report EVERY row.
+    const doorlessCountLines = (t, f, bw, bh, lh, s) => {
+        try { return TextLayout.countLines(t, f, bw, bh, lh, s); } catch (err) { return 0; }
+    };
+    const missShared = doorMisses(doorlessCountLines, 'control10-doorless-countLines');
+    if (missShared !== DOOR_ROWS.length) {
+        die('T9 control 10: doorMisses reported ' + missShared + ' of ' + DOOR_ROWS.length +
+            ' misses against a countLines whose rejections are swallowed -- the shared-door ' +
+            'detector cannot see a missing door');
+    }
+    check(doorMisses(TextLayout.countLines, 'control10-real') === 0,
+        () => 'T9 control 10: the real countLines reports door misses -- the door is not shared');
+
+    // Control 11 (TL2) -- THE PHANTOM LINE. The detector is harness.countPhantoms,
+    // the same predicate T1's TL-26 pins use. Hand-build the 1.1.0 output for
+    // 'AAA \nBBB' at boxWidth 40 -- three lines, the middle one the phantom
+    // [4,4,0,0] -- and require the detector to see it.
+    const PH_TEXT = 'AAA \nBBB';
+    const phantomBuf = new Float32Array(12);
+    phantomBuf.set([0, 3, 36, FLAG_NORMAL, 4, 4, 0, FLAG_NORMAL, 5, 8, 36, FLAG_NORMAL]);
+    if (countPhantoms(PH_TEXT, phantomBuf, 3) !== 1) {
+        die('T9 control 11: countPhantoms found ' + countPhantoms(PH_TEXT, phantomBuf, 3) +
+            ' phantoms in the exact 1.1.0 output for ' + JSON.stringify(PH_TEXT) +
+            ' -- the TL-26 detector is blind and reverting the suppression would pass');
+    }
+    // The DELIBERATE blank line must NOT register, or the detector would demand
+    // a regression. 'AAA\n\nBBB' line 1 is [4,4] preceded by a newline, not a space.
+    const blankBuf = new Float32Array(12);
+    blankBuf.set([0, 3, 36, FLAG_NORMAL, 4, 4, 0, FLAG_NORMAL, 5, 8, 36, FLAG_NORMAL]);
+    check(countPhantoms('AAA\n\nBBB', blankBuf, 3) === 0,
+        () => 'T9 control 11: countPhantoms counted a DELIBERATE blank line as a phantom -- the ' +
+            'discriminator is the character before lineStart, 32 not 10');
+    // And the live subject, through the same detector, must be clean.
+    const liveBuf = new Float32Array(12);
+    const liveN = TextLayout.computeWrap(PH_TEXT, FONT, 40, 0, 16, liveBuf, 1);
+    check(liveN === 2 && countPhantoms(PH_TEXT, liveBuf, liveN) === 0,
+        () => 'T9 control 11: the live subject still emits a phantom line');
+
+    // Control 12 (TL2) -- THE CR EXCLUSION. The detector is harness.crlfInRange,
+    // the same predicate T1's TL-13 pin uses. Hand-build the 1.1.0 output for
+    // 'AAA\r\nBBB' -- endIdx 4, putting the CR INSIDE the range -- and require
+    // the detector to see it.
+    const CR_TEXT = 'AAA\r\nBBB';
+    const crBuf = new Float32Array(8);
+    crBuf.set([0, 4, 36, FLAG_NORMAL, 5, 8, 36, FLAG_NORMAL]);
+    if (crlfInRange(CR_TEXT, crBuf, 2) !== 1) {
+        die('T9 control 12: crlfInRange found ' + crlfInRange(CR_TEXT, crBuf, 2) +
+            ' CR-in-range lines in the exact 1.1.0 output for AAA-CRLF-BBB -- the TL-13 detector ' +
+            'is blind and reverting the CR exclusion would pass');
+    }
+    // A LONE CR is not a terminator and must NOT register -- otherwise the
+    // detector would demand that lone CRs be excluded too, which is a policy
+    // this session explicitly rejected (decisions/0002-input-door.md).
+    const loneBuf = new Float32Array(4);
+    loneBuf.set([0, 7, 72, FLAG_NORMAL]);
+    check(crlfInRange('AAA\rBBB', loneBuf, 1) === 0,
+        () => 'T9 control 12: crlfInRange flagged a LONE CR -- only a CR followed by LF is a ' +
+            'terminator');
+    // And the live subject, through the same detector, must be clean.
+    const crLive = new Float32Array(8);
+    const crN = TextLayout.computeWrap(CR_TEXT, FONT, 0, 0, 16, crLive, 1);
+    check(crN === 2 && crlfInRange(CR_TEXT, crLive, crN) === 0 && crLive[1] === 3,
+        () => 'T9 control 12: the live subject still puts the CR inside the emitted range');
 
     // Controls deferred to their session.
     todo('control-6', 'double-scaled width -- lands in TL3');

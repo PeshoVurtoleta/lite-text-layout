@@ -25,10 +25,14 @@
  *
  * `linesDiverge` and `widthClose` are exported so T9's control 2 gates against
  * the exact same comparator this tier uses.
+ *
+ * TL2 adds the FLAGS TRIPWIRE: `flagslots=<n> badvalue=<n> bothflags=<n>` on the
+ * T5 stderr line. It walks the flags slots of the capped run through the shared
+ * `harness.scanFlags`, which T9 control 8 gates in both directions.
  */
 
-import { TextLayout, FLAG_OVERFLOW } from '../../TextLayout.js';
-import { SEED, FONT, makePrng, makeCorpus, knownFailing, die } from './harness.mjs';
+import { TextLayout, FLAG_NORMAL, FLAG_TRUNCATED, FLAG_OVERFLOW } from '../../TextLayout.js';
+import { SEED, FONT, makePrng, makeCorpus, check, die, scanFlags } from './harness.mjs';
 import { oracleWrap } from './oracle.mjs';
 
 const CASES = 50000;
@@ -87,6 +91,25 @@ export function run() {
     let divergences = 0;
     let tl26 = 0;
     let unexpected = 0;
+
+    // --- the flags tripwire (TL2) ----------------------------------------
+    // TL1's QA verified BY HAND that no output ever carries a flags value
+    // outside the value space, and that FLAG_TRUNCATED and FLAG_OVERFLOW never
+    // appear in one output. Both claims were left uninstrumented. They are
+    // instrumented HERE, before TL2 changes any behaviour, so the numbers are
+    // a pre-change baseline and not the new code agreeing with itself.
+    //
+    // The scanned region is the CAPPED run (`buf`), the only one of the three
+    // computeWrap calls per case that can carry FLAG_OVERFLOW at all -- the
+    // oracle run has boxHeight 0 and the OUT_BIG run is unbounded by
+    // construction (and die()s above if it ever overflows). Scanning a region
+    // that cannot produce either violation would be a vacuous tripwire.
+    //
+    // Three module-local counters and no per-case allocation: scanFlags returns
+    // a packed integer, no array, no subarray, no closure.
+    let flagslots = 0;
+    let badvalue = 0;
+    let bothflags = 0;
 
     for (let ci = 0; ci < CASES; ci++) {
         const text = corpus[ci].text;
@@ -151,6 +174,12 @@ export function run() {
             }
         }
 
+        // --- the flags tripwire, over the capped run's written region -------
+        const viol = scanFlags(buf, expectN);
+        flagslots += expectN;
+        badvalue += viol >> 1;
+        bothflags += viol & 1;
+
         if (!diverged) continue;
 
         divergences++;
@@ -184,14 +213,34 @@ export function run() {
     }
 
     process.stderr.write('torture: T5 cases=' + CASES + ' divergences=' + divergences +
-        ' (tl26=' + tl26 + ' unexpected=' + unexpected + ')\n');
+        ' (tl26=' + tl26 + ' unexpected=' + unexpected + ')' +
+        ' flagslots=' + flagslots + ' badvalue=' + badvalue + ' bothflags=' + bothflags + '\n');
 
-    // Oracle-protection: register the finding, never bend the oracle. The
-    // promotion path must be REACHABLE -- the predicate re-reads the live count
-    // so the day TL2 fixes the phantom line and tl26 drops to 0, knownFailing
-    // die()s here demanding the win be claimed, instead of the finding silently
-    // dropping out of the ledger. This mirrors T1's stillBrokenFn shape.
-    knownFailing('TL-26', () => tl26 > 0);
+    // Fail closed on either violation class. The flags are a VALUE SPACE
+    // (decisions/0001-flag-overflow.md): compare by equality, never by
+    // truthiness, and never widen the space silently.
+    if (badvalue > 0) {
+        die('T5 flags: ' + badvalue + ' of ' + flagslots + ' flags slots hold a value outside {' +
+            FLAG_NORMAL + ', ' + FLAG_TRUNCATED + ', ' + FLAG_OVERFLOW + '}');
+    }
+    if (bothflags > 0) {
+        die('T5 flags: ' + bothflags + ' output(s) carry both FLAG_TRUNCATED (' + FLAG_TRUNCATED +
+            ') and FLAG_OVERFLOW (' + FLAG_OVERFLOW + ') -- the two are mutually exclusive in one call');
+    }
+
+    // TL-26 PROMOTED (TL2). The oracle was never bent: it is byte-identical to
+    // the file that surfaced the finding, and the subject now agrees with it on
+    // all 50,000 cases. The classifier keeps its `tl26=` counter so the stderr
+    // line stays comparable with every earlier session's number, and so a
+    // REGRESSION lands in the tl26 bucket rather than in `unexpected`.
+    //
+    // The corpus contains no '\r' (makeCorpus emits letters, ' ' and '\n'
+    // only), so the CRLF half of the TL-13 edit is out of this tier's domain
+    // and oracle.mjs needed no CRLF rule. TL-13 is pinned by hand in T1.
+    check(divergences === 0,
+        () => 'T5: ' + divergences + ' divergence(s) from the oracle (tl26=' + tl26 +
+            ' unexpected=' + unexpected + ') -- TL-26 was promoted in TL2, so any phantom line ' +
+            'here is a regression');
 
     // `unexpected` is the abnormal counter: 0 today. A nonzero value is a NEW
     // divergence the phantom-line hypothesis does not explain. Fail closed and
