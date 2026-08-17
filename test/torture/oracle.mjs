@@ -18,6 +18,15 @@
  *      line is skipped (the "space-eater"). boxWidth <= 0 means no limit.
  *   5. Hard-break mid-word when a single word alone exceeds the box, always
  *      emitting at least one glyph per line.
+ *   6. TL-13 CRLF (TL3): a CR is an ordinary id in [0,256) with atlas advance 0,
+ *      so it participates in the wrapping pass (rule 3) like any zero-advance
+ *      glyph, INCLUDING being hard-broken onto its own line. A CR immediately
+ *      before a paragraph's terminating LF is the CR half of a CRLF terminator
+ *      and is EXCLUDED from the emitted range (trimmed from the last line). A
+ *      lone CR (no following LF) keeps its advance and stays in range -- the same
+ *      contract the subject holds (decisions/0002-input-door.md, TL-13). This is
+ *      why the CRLF corpus (harness.makeCorpus) differentials to zero against the
+ *      subject on BOTH the normal arm AND the hard-break-onto-CR case.
  *
  * DOCUMENTED-BEHAVIOUR NOTE (TL-14): leading whitespace is skipped ONLY after a
  * soft break. Whitespace at the very start of the text, and whitespace right
@@ -73,6 +82,7 @@ function measureRange(text, a, b, glyphs, kerning, scale) {
  * produced.
  */
 function wrapParagraph(text, s, e, boxWidth, infinite, glyphs, kerning, scale, lines) {
+    const base = lines.length;
     if (s >= e) {
         lines.push({ start: s, end: s, width: 0 });
         return;
@@ -129,6 +139,22 @@ function wrapParagraph(text, s, e, boxWidth, infinite, glyphs, kerning, scale, l
 
     // Flush the remainder, trailing spaces included.
     if (lineStart < e) lines.push({ start: lineStart, end: e, width: w });
+
+    // TL-13 (TL3): a CR immediately before this paragraph's terminating LF is the
+    // CR half of a CRLF terminator. It is a ZERO-ADVANCE GLYPH -- it took part in
+    // the wrapping pass above exactly like any id in [0,256) whose atlas advance
+    // is 0 (measureRange and the loop already treat it that way), so it can be
+    // HARD-BROKEN onto a line of its own when the content before it overflows.
+    // But it is a terminator, not content, so it is EXCLUDED from the emitted
+    // range: trim it from the last line. When a hard break stranded the CR alone,
+    // the trim yields an EMPTY range -- the same line the subject emits, which is
+    // why this MODELS the subject's documented CR-as-glyph rule rather than
+    // hiding it. A LONE CR (not before an LF) is never at e-1 of a paragraph, so
+    // it is never trimmed and stays in range, in both -- the documented contract.
+    if (text.charCodeAt(e - 1) === 13 && lines.length > base) {
+        const last = lines[lines.length - 1];
+        if (last.end === e) last.end = e - 1;
+    }
 }
 
 /**

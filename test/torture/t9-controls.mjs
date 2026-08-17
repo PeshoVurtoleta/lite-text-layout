@@ -32,7 +32,7 @@
  *     4 overflow detector     5 freeze detector         6 RESERVED -- TL3
  *     7 TEXTLAYOUT_TORTURE_BREAK (whole-suite, out of process)
  *     8 flags tripwire        9 the input door         10 the SHARED door
- *    11 the phantom line     12 the CRLF exclusion
+ *    11 the phantom line     12 the CRLF exclusion     13 CRLF on the trunc arm
  *
  * Controls 9 to 12 gate mechanisms that live in TextLayout.js, which this
  * process cannot edit. Each one therefore feeds the SHARED detector the real
@@ -277,6 +277,40 @@ export function run() {
     const crN = TextLayout.computeWrap(CR_TEXT, FONT, 0, 0, 16, crLive, 1);
     check(crN === 2 && crlfInRange(CR_TEXT, crLive, crN) === 0 && crLive[1] === 3,
         () => 'T9 control 12: the live subject still puts the CR inside the emitted range');
+
+    // Control 13 (TL3) -- THE CR EXCLUSION ON THE TRUNCATING ARM. This is the
+    // control that would have caught TL2's only blocker. The blocker lived on the
+    // TRUNCATING newline path (TextLayout.js:406-409): the emitted endIdx carried
+    // the CR back INTO the range, and NO differential could see it because the
+    // oracle has no boxHeight and never reaches truncation. The detector is the
+    // SAME harness.crlfInRange the T5 truncating-arm sweep uses. Hand-build the
+    // 1.x-style BROKEN truncating output for 'AAA\r\nBBB' -- endIdx 4, putting the
+    // CR inside the range, flagged FLAG_TRUNCATED -- and require the detector to
+    // see it.
+    const CR_TRUNC_TEXT = 'AAA\r\nBBB';
+    const crTruncBad = new Float32Array(4);
+    crTruncBad.set([0, 4, 36, FLAG_TRUNCATED]);   // endIdx 4 reincludes the CR
+    if (crlfInRange(CR_TRUNC_TEXT, crTruncBad, 1) !== 1) {
+        die('T9 control 13: crlfInRange found ' + crlfInRange(CR_TRUNC_TEXT, crTruncBad, 1) +
+            ' CR-in-range lines in a truncating output whose endIdx reincludes the CR -- the ' +
+            'truncating-arm TL-13 detector is blind and reverting the CR exclusion would pass');
+    }
+    // A truncating output that correctly EXCLUDES the CR (endIdx 3) must NOT
+    // register -- otherwise the control would demand a regression.
+    const crTruncGood = new Float32Array(4);
+    crTruncGood.set([0, 3, 36, FLAG_TRUNCATED]);
+    check(crlfInRange(CR_TRUNC_TEXT, crTruncGood, 1) === 0,
+        () => 'T9 control 13: crlfInRange flagged a truncating output whose endIdx already ' +
+            'excludes the CR -- the detector is over-eager');
+    // And the LIVE subject on the truncating arm must be clean: a box one line
+    // tall truncates 'AAA\r\nBBB' to a single FLAG_TRUNCATED line whose range
+    // ends at 3 (the CR excluded), so crlfInRange is 0.
+    const crTruncLive = new Float32Array(4);
+    const crTruncN = TextLayout.computeWrap(CR_TRUNC_TEXT, FONT, 0, 16, 16, crTruncLive, 1);
+    check(crTruncN === 1 && crTruncLive[3] === FLAG_TRUNCATED && crTruncLive[1] === 3 &&
+          crlfInRange(CR_TRUNC_TEXT, crTruncLive, crTruncN) === 0,
+        () => 'T9 control 13: the live truncating subject put the CR inside the emitted range ' +
+            '(n=' + crTruncN + ' endIdx=' + crTruncLive[1] + ' flag=' + crTruncLive[3] + ')');
 
     // Controls deferred to their session.
     todo('control-6', 'double-scaled width -- lands in TL3');

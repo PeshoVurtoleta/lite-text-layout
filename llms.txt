@@ -5,7 +5,7 @@ Zero-GC word wrapper for ASCII bitmap fonts. Computes line breaks, kerning-aware
 ## Key Facts
 
 - **Package**: `@zakkster/lite-text-layout`
-- **Version**: 1.2.0
+- **Version**: 1.2.1
 - **Bundle**: ~1.1 KB minified, ~0.6 KB gzipped
 - **Dependencies**: 0
 - **License**: MIT
@@ -174,6 +174,19 @@ const flags     = layout[o + 3];
 - **`boxHeight > 0` with `lineHeight * scale > boxHeight` returns `0` and writes nothing.** A box that cannot hold one line holds no lines. The boundary is `>`, not `>=`: a box exactly one line tall still emits its line.
 - **Index ceiling**: `startIdx` and `endIdx` are Float32 slots, exact only to 2^24 = 16777216. A text longer than 16777216 characters lays out correctly below that index and reports wrong indices above it -- out of domain, documented rather than policed.
 
+## Range Contract
+
+The four range facts, stated once and drift-guarded byte-for-byte across this file, the source docstring, `TextLayout.d.ts` and `README.md` (`test/TextLayout.drift.test.js` fails if any surface's wording drifts):
+
+```
+RANGE-CONTRACT v1
+startIdx is inclusive and endIdx is exclusive, and both are indices into the original string.
+The breaking space is excluded from both sides.
+Leading whitespace is skipped only after a soft break; it is content at text start and immediately after an explicit newline.
+lineWidth is at the rendered scale and includes the ellipsis allowance on a FLAG_TRUNCATED line.
+END RANGE-CONTRACT
+```
+
 ## Truncation Rules
 
 When `boxHeight > 0` and the wrap point would push content past the bottom of the box, the last fitting line is flagged `FLAG_TRUNCATED`. The renderer appends `...` (three ASCII `.` glyphs) -- no per-frame string allocation.
@@ -204,7 +217,7 @@ Characters with `id >= 256` contribute zero advance and reset the kerning contex
 export const FLAG_NORMAL: 0;
 export const FLAG_TRUNCATED: 1;
 export const FLAG_OVERFLOW: 2;
-export const VERSION: '1.2.0';
+export const VERSION: '1.2.1';
 
 // Law 6 -- flags are a value space; compare by equality, never by truthiness.
 export type LineFlag = typeof FLAG_NORMAL | typeof FLAG_TRUNCATED | typeof FLAG_OVERFLOW;

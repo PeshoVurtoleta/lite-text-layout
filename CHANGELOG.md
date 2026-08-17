@@ -4,6 +4,62 @@ All notable changes to `@zakkster/lite-text-layout` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-08-17
+
+The range contract, made executable. 1.2.0 stated the output-buffer semantics in
+prose, separately, across four files; 1.2.1 pins them in one canonical block that
+a test holds byte-identical, and turns the cross-package width contract with
+`@zakkster/lite-bmfont` into a gated conformance tier instead of a sentence. No
+runtime behaviour changes: the `TextLayout.js` diff is comment-only and the
+zero-allocation hot path is byte-identical to 1.2.0 (T6 lanes: major 0, minor 0,
+source gc, arrayBuffers 0).
+
+### Added
+
+- Range-contract drift guard (`test/TextLayout.drift.test.js`): the four
+  documentation surfaces -- source docstring, `TextLayout.d.ts`, `llms.txt`,
+  `README.md` -- carry one canonical range-contract block behind
+  `RANGE-CONTRACT` / `END RANGE-CONTRACT` sentinels; the test extracts all four,
+  asserts they are byte-identical after prefix/whitespace normalization, and pins
+  them to a fixed canonical text, so the contract cannot rot into four
+  slightly-different sentences.
+- Cross-package conformance tier (torture T8) against `@zakkster/lite-bmfont`, a
+  test-only devDependency (zero runtime dependencies, both directions, unchanged):
+  width agreement `lineWidth === font.measure(text.slice(startIdx, endIdx),
+  scale)` over 19685 wrapped lines at scale 0.5/1/2; the truncated-line exception
+  `lineWidth - measure(content) === 3 * xadvance('.') * scale`; stride-4 and
+  `flags === 1` format checks.
+- CRLF differential coverage: `makeCorpus` emits `\r\n` on ~40% of between-word
+  newlines and the brute-force oracle models the CR as the zero-advance glyph it
+  is, so the 50,000-case fuzz differential and a truncating-arm `crlfInRange`
+  invariant sweep now exercise the CRLF path 1.2.0's gate was blind to
+  (divergences 0, crInRange 0). T9 control 13 reproduces the truncating-arm CR
+  exclusion two-directionally.
+- 12 boundary tests (`test/TextLayout.boundary.test.js`); `npm test` rises from
+  54 to 68.
+- Torture `RULES` pins `maxMinor: 0`; `runOpsGate` dies on a gc-profiler source
+  other than `gc`.
+- Decision records `0003-scale-contract.md` (rendered-scale width; TL-25 closes
+  in the peer) and `0004-nonascii-kerning-seam.md` (ASCII-scoped width agreement).
+
+### Changed
+
+- Documentation only. The canonical range sentences replace four independently
+  paraphrased copies. `VERSION` is `1.2.1`.
+
+### Known
+
+- TL-25: `BitmapFont.drawWrapped` applies `* scale` to a `lineWidth` this package
+  has already scaled, displacing centred and right-aligned lines by a factor of
+  `scale` (measured: lineWidth 51/102/204 at scale 0.5/1/2; drawWrapped uses
+  25.5/102/408, agreeing only at scale 1). Recorded as a named `knownFailing`
+  entry in T8 and filed against the peer; the fix is one term in
+  `@zakkster/lite-bmfont`, not here.
+- TL-28: this package resets the kerning context on a non-ASCII glyph (id >= 256)
+  while bmfont's `measure` bridges it, so width agreement is scoped to ASCII
+  (measured divergence: 24 vs 19). Defined behaviour, recorded in
+  `decisions/0004-nonascii-kerning-seam.md`.
+
 ## [1.2.0] - 2026-08-17
 
 `NaN` is not infinity, and `null` is not zero. Every guard in this file was

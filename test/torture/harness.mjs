@@ -47,8 +47,18 @@ export const BREAK = process.env.TEXTLAYOUT_TORTURE_BREAK === '1';
  * Base zero-GC rules. `maxArrayBuffersGrowth` needs measureOps `stabilize:'deep'`.
  * Unknown keys throw on every lane including checkNoGc; there is no
  * `maxExternalGrowth`. Do not add keys without reading ../LiteGCProfiler/llms.txt.
+ *
+ * `maxMinor: 0` (TL3): a scavenge inside a measured window is transient garbage
+ * the hot path is not allowed to make. TL2 asserted `minor === 0` by hand on all
+ * three T6 lanes; the gate would not have noticed it move. It is a rule now, so
+ * a lane that triggers even one scavenge reddens the gate.
+ *
+ * `source` is NOT expressible as a checkNoGc rule (it is not a threshold; adding
+ * it here would throw as an unknown key). It is pinned instead in `runOpsGate`,
+ * which die()s when the profiler source is not 'gc' -- on any other source
+ * maxMajor/maxMinor land inconclusive and the gate would pass vacuously.
  */
-export const RULES = { maxMajor: 0, maxPauseMs: 4, maxArrayBuffersGrowth: 0 };
+export const RULES = { maxMajor: 0, maxMinor: 0, maxPauseMs: 4, maxArrayBuffersGrowth: 0 };
 
 /** Seeded xorshift32. Returns a function yielding a uint32 each call. */
 export function makePrng(seed) {
@@ -148,6 +158,21 @@ export function sumWidth(text, font, start, end, scale) {
  * the line after a soft break) is never exercised, and a mutant that deletes it
  * escapes the whole suite (the AR-02 blind spot).
  *
+ * CRLF (TL3): roughly one in three of the BETWEEN-WORD newlines is emitted as
+ * '\r\n' instead of '\n', so a meaningful share of the 50,000 T5 cases (about
+ * 40%) carry a CR immediately before an LF -- the character TL2's CRLF gap was
+ * blind to. The injection is scoped to the between-word site because that is a
+ * simple, sufficient way to reach broad CRLF coverage across both the
+ * non-truncating (T5 oracle differential) and truncating (T5 crlfInRange sweep,
+ * T9 control 13) arms; it is NOT a claim about where the CR can land in the
+ * OUTPUT. A near-degenerate box hard-breaks the last glyph before a CRLF
+ * terminator onto its own line, parking the next line's start ON the CR and
+ * emitting a legitimate empty range that begins with the CR (code 13). That is
+ * correct, symmetric to the LF case, and T0 laws 1 and 7 both account for it (a
+ * CR is accepted in a skipped gap and as an empty-line start only when its LF
+ * follows at the next index; a lone CR still fails). The oracle models the CR as
+ * the zero-advance glyph it is, so the differential is 0 including that case.
+ *
  * @param {() => number} prng
  * @param {number} n
  * @returns {Array<{text:string, boxWidth:number, scale:number}>}
@@ -191,8 +216,11 @@ export function makeCorpus(prng, n) {
             let nlLeft = newlines;
             for (let w = 0; w < wordCount; w++) {
                 if (w > 0) {
-                    if (nlLeft > 0 && (prng() % 3) === 0) { parts.push('\n'); nlLeft--; }
-                    else parts.push(' '.repeat(1 + (prng() % 4)));   // runs of 1..4 spaces
+                    if (nlLeft > 0 && (prng() % 3) === 0) {
+                        // TL3: ~1 in 3 between-word newlines carries a CR (CRLF).
+                        parts.push((prng() % 3) === 0 ? '\r\n' : '\n');
+                        nlLeft--;
+                    } else parts.push(' '.repeat(1 + (prng() % 4)));   // runs of 1..4 spaces
                 }
                 parts.push(words[w]);
             }
@@ -372,6 +400,14 @@ export function crlfInRange(text, buf, n) {
         const s = buf[k * 4];
         const e = buf[k * 4 + 1];
         for (let j = s; j < e; j++) {
+            // `charCodeAt(j + 1)` reads ONE PAST the range end when j === e - 1.
+            // That is deliberate and load-bearing: a CR at the very end of an
+            // emitted range with its LF sitting just OUTSIDE the range is exactly
+            // the bug this hunts (endIdx should have excluded the CR). Past the
+            // string end `charCodeAt` is NaN, and `NaN !== 10`, so the last
+            // character of the last line can never false-positive. Do not "tidy"
+            // this to `j + 1 < e` -- that blinds the detector to the only case
+            // it exists for and turns the whole CRLF sweep into a no-op.
             if (text.charCodeAt(j) === 13 && text.charCodeAt(j + 1) === 10) { c++; break; }
         }
     }
@@ -471,6 +507,15 @@ export function runOpsGate(fn, opts) {
         warmup: opts.warmup === undefined ? 0 : opts.warmup,
         stabilize: 'deep',
     });
+    // Pin the source (TL3). maxMajor/maxMinor are only verifiable on the 'gc'
+    // source (perf_hooks under --expose-gc); on any other source they land
+    // inconclusive and checkNoGc would report a vacuous non-failure. A gate that
+    // cannot verify its own metric is not a gate, so this is a die(), not a warn.
+    if (res.summary.source !== 'gc') {
+        die('runOpsGate: gc-profiler source is "' + res.summary.source + '", not "gc" -- ' +
+            'maxMajor/maxMinor are unverifiable and the zero-alloc gate would pass vacuously. ' +
+            'Run with node --expose-gc.');
+    }
     return { report: checkNoGc(res.summary, RULES), summary: res.summary };
 }
 

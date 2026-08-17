@@ -17,7 +17,7 @@ TL-26 was found by the TL0 torture suite itself.
 | Area | State | What it needs |
 | --- | --- | --- |
 | **Hot body** | One linear pass, 0 bytes/op at 20,000 ops, `verdict: pass`, major 0, minor 0, maxMs 0.000 | **Nothing.** Lock it behind a gate that can fail. Do not invent allocation work. |
-| **Correctness** | Buffer overflow now fails CLOSED (`FLAG_OVERFLOW`, `countLines`, shipped 1.1.0); NaN scale, NaN boxWidth, `lineHeight <= 0` and a short glyph table each still silently disable a documented rule | TL1 done; TL2 is the remaining behaviour session |
+| **Correctness** | Buffer overflow fails CLOSED (`FLAG_OVERFLOW`, `countLines`, 1.1.0); the input door + `TextLayoutError` throw on NaN/negative/short-table/non-string/non-buffer args, CRLF is excluded from the emitted range, and the zero-line box is defined (1.2.0). Behaviour surface is closed | TL1 + TL2 done; range/cross-package contract (TL3) is the remaining non-doc session |
 | **Harness** | `vitest run`, test file in the package root, no `test/`, no torture gate, no CHANGELOG, no `VERSION`, `npx esbuild` in `prepublishOnly` | TL0, first, before any behaviour change |
 | **Docs** | Three version numbers disagree, README is not on the suite blueprint, 126 non-ASCII lines across five shipped files | TL4, last, after the surface stops moving |
 | **Cross-package** | The bmfont contract is stated nowhere executable, and `drawWrapped` re-scales a width this package already scaled (TL-25) | TL3 now, TL5 when bmfont ships |
@@ -715,7 +715,7 @@ DONE WHEN
 ---
 package: "@zakkster/lite-text-layout"
 version_target: 1.2.0
-status: planned
+status: shipped          # 2026-08-17; 54 tests, torture ok; TL-03..10/12/13/14/15/23/24/26 closed; input door + TextLayoutError + CRLF
 gc_maxMajor: 0
 gc_maxPauseMs: 4
 alloc_bytes_per_op: 0

@@ -138,9 +138,15 @@ export function run() {
                     () => 'T0 law1 order: case ' + ci + ' line ' + k + ' start ' + s + ' < prev end ' + prevEnd);
                 for (let c = prevEnd; c < s; c++) {
                     const cc = text.charCodeAt(c);
-                    if (cc !== 32 && cc !== 10) {
+                    // A char skipped between two emitted ranges is a soft-break
+                    // space (32), a paragraph newline (10), or -- since TL3's
+                    // corpus carries CRLF -- a CR (13) that IMMEDIATELY precedes
+                    // an LF, i.e. the CR half of a CRLF terminator the subject
+                    // excludes from the range. A CR not followed by LF is still a
+                    // violation, so the law stays strict.
+                    if (cc !== 32 && cc !== 10 && !(cc === 13 && text.charCodeAt(c + 1) === 10)) {
                         check(false,
-                            () => 'T0 law1 skipped: case ' + ci + ' char ' + c + ' code ' + cc + ' not space/newline');
+                            () => 'T0 law1 skipped: case ' + ci + ' char ' + c + ' code ' + cc + ' not space/newline/CR-of-CRLF');
                     }
                 }
             }
@@ -153,9 +159,19 @@ export function run() {
                 () => 'T0 law2 width: case ' + ci + ' line ' + k + ' got ' + w + ' expect ' + expect);
 
             // Law 7 -- an empty line only ever comes from an explicit newline.
+            // The start char is an LF (10), or -- since TL3's corpus carries CRLF
+            // -- the CR (13) of a CRLF terminator whose LF sits at s+1. The CR
+            // case is SYMMETRIC to the LF one: a near-degenerate box hard-breaks
+            // the last glyph before the terminator onto its own line, parking the
+            // next line's start on the terminator; with '\n' that start is the LF,
+            // with '\r\n' it is the CR, and the subject legitimately emits the
+            // empty line in both (the TL-26 phantom guard does NOT suppress it --
+            // the char before lineStart is a glyph, not a space). A LONE CR
+            // (cc(s+1) !== 10) still fails, so the law stays strict on its bug.
             if (s === e) {
-                check(s < len && text.charCodeAt(s) === 10,
-                    () => 'T0 law7 empty: case ' + ci + ' zero-width line at ' + s + ' not a newline');
+                const cc = text.charCodeAt(s);
+                check(s < len && (cc === 10 || (cc === 13 && text.charCodeAt(s + 1) === 10)),
+                    () => 'T0 law7 empty: case ' + ci + ' zero-width line at ' + s + ' not a newline/CR-of-CRLF');
             }
 
             // Law 7b -- an all-space line is legitimate only at a paragraph

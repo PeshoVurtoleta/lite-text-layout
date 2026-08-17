@@ -114,6 +114,21 @@ if (layout[lineCount * 4 - 1] === FLAG_TRUNCATED) {
 }
 ```
 
+## Range contract
+
+The four range facts, stated once and drift-guarded byte-for-byte across this
+README, the source docstring, `TextLayout.d.ts` and `llms.txt`
+(`test/TextLayout.drift.test.js` fails if any surface's wording drifts):
+
+```
+RANGE-CONTRACT v1
+startIdx is inclusive and endIdx is exclusive, and both are indices into the original string.
+The breaking space is excluded from both sides.
+Leading whitespace is skipped only after a soft break; it is content at text start and immediately after an explicit newline.
+lineWidth is at the rendered scale and includes the ellipsis allowance on a FLAG_TRUNCATED line.
+END RANGE-CONTRACT
+```
+
 ## Wrapping rules
 
 - **Soft-break** at the last space when adding the next glyph would exceed `boxWidth`.

@@ -32,7 +32,7 @@
  */
 
 import { TextLayout, FLAG_NORMAL, FLAG_TRUNCATED, FLAG_OVERFLOW } from '../../TextLayout.js';
-import { SEED, FONT, makePrng, makeCorpus, check, die, scanFlags } from './harness.mjs';
+import { SEED, FONT, makePrng, makeCorpus, check, die, scanFlags, crlfInRange } from './harness.mjs';
 import { oracleWrap } from './oracle.mjs';
 
 const CASES = 50000;
@@ -111,6 +111,21 @@ export function run() {
     let badvalue = 0;
     let bothflags = 0;
 
+    // --- the CRLF invariant, over the TRUNCATING arm (TL3) ---------------
+    // The oracle differential above (OUT vs ref) covers only boxHeight === 0 --
+    // oracleWrap has no boxHeight parameter and models wrapping, never
+    // truncation (see oracle.mjs). That is precisely the arm TL2's blocker did
+    // NOT live in; the blocker put a CR INSIDE the emitted range on the
+    // TRUNCATING path, and no differential could have seen it because the oracle
+    // does not reach that path. So the truncating arm's CRLF coverage is this
+    // standalone INVARIANT instead: a CR is never inside an emitted range. It is
+    // swept over the bh>0 OUT_BIG run below (the same run whose boxHeight is
+    // drawn per case) through the SAME crlfInRange detector T9 control 13 gates,
+    // and asserted 0. With ~40% of cases carrying CRLF (harness.makeCorpus) and
+    // BOX_HEIGHTS mixing 0 with truncating heights, this exercises CRLF against
+    // the truncating range emit on tens of thousands of cases.
+    let crInRange = 0;
+
     for (let ci = 0; ci < CASES; ci++) {
         const text = corpus[ci].text;
         const boxWidth = corpus[ci].boxWidth;
@@ -141,6 +156,9 @@ export function run() {
                 die('T5 agreement: OUT_BIG too small (case ' + ci + ' bh ' + bh + ') -- comparison vacuous');
             }
         }
+        // The CRLF invariant over the truncating-arm run: no CR inside a range.
+        crInRange += crlfInRange(text, OUT_BIG, need);
+
         const cl = TextLayout.countLines(text, FONT, boxWidth, bh, 16, scale);
         if (cl !== need) {
             die('T5 agreement: countLines ' + cl + ' != computeWrap ' + need +
@@ -214,7 +232,17 @@ export function run() {
 
     process.stderr.write('torture: T5 cases=' + CASES + ' divergences=' + divergences +
         ' (tl26=' + tl26 + ' unexpected=' + unexpected + ')' +
-        ' flagslots=' + flagslots + ' badvalue=' + badvalue + ' bothflags=' + bothflags + '\n');
+        ' flagslots=' + flagslots + ' badvalue=' + badvalue + ' bothflags=' + bothflags +
+        ' crInRange=' + crInRange + '\n');
+
+    // The CRLF invariant on the truncating arm. A single CR inside an emitted
+    // range is TL2's blocker resurfacing -- fail closed. Deleting the subject's
+    // truncating-arm CR exclusion (TextLayout.js:407) drives this above 0, which
+    // is exactly what T9 control 13 reproduces two-directionally.
+    if (crInRange > 0) {
+        die('T5 CRLF: ' + crInRange + ' emitted range(s) across the truncating-arm run contain a ' +
+            'CR immediately before an LF -- the CR must be excluded from the range (TL-13)');
+    }
 
     // Fail closed on either violation class. The flags are a VALUE SPACE
     // (decisions/0001-flag-overflow.md): compare by equality, never by
@@ -234,9 +262,12 @@ export function run() {
     // line stays comparable with every earlier session's number, and so a
     // REGRESSION lands in the tl26 bucket rather than in `unexpected`.
     //
-    // The corpus contains no '\r' (makeCorpus emits letters, ' ' and '\n'
-    // only), so the CRLF half of the TL-13 edit is out of this tier's domain
-    // and oracle.mjs needed no CRLF rule. TL-13 is pinned by hand in T1.
+    // TL3: the corpus now emits CRLF (~40% of cases carry a CR before an LF),
+    // and oracle.mjs models the CR as the zero-advance glyph it is (participates
+    // in wrapping, trimmed from the range at the terminator). So the differential
+    // below EXERCISES CRLF on the non-truncating arm and stays 0. The truncating
+    // arm is covered by the crInRange invariant asserted above, not here (the
+    // oracle has no boxHeight). Deleting oracle.mjs's CR handling drives this > 0.
     check(divergences === 0,
         () => 'T5: ' + divergences + ' divergence(s) from the oracle (tl26=' + tl26 +
             ' unexpected=' + unexpected + ') -- TL-26 was promoted in TL2, so any phantom line ' +

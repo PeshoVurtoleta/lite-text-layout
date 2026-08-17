@@ -19,7 +19,7 @@ export const FLAG_TRUNCATED: 1;
 export const FLAG_OVERFLOW: 2;
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION: '1.2.0';
+export const VERSION: '1.2.1';
 
 /**
  * Thrown by both entry points when an argument fails the input door (1.2.0).
@@ -112,6 +112,16 @@ export const TextLayout: {
      *   writes NOTHING: a box that cannot hold one line holds no lines.
      * - `startIdx`/`endIdx` are Float32 slots, exact only to 2^24 = 16777216.
      *   A longer text is out of domain.
+     *
+     * The range contract, drift-guarded byte-for-byte across four surfaces
+     * (test/TextLayout.drift.test.js):
+     *
+     * RANGE-CONTRACT v1
+     * startIdx is inclusive and endIdx is exclusive, and both are indices into the original string.
+     * The breaking space is excluded from both sides.
+     * Leading whitespace is skipped only after a soft break; it is content at text start and immediately after an explicit newline.
+     * lineWidth is at the rendered scale and includes the ellipsis allowance on a FLAG_TRUNCATED line.
+     * END RANGE-CONTRACT
      *
      * @param text        Source string.
      * @param font        Object exposing the flat glyph/kerning tables; a

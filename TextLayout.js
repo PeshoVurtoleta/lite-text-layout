@@ -54,7 +54,7 @@ export const FLAG_TRUNCATED = 1;
 export const FLAG_OVERFLOW = 2;
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION = '1.2.0';
+export const VERSION = '1.2.1';
 
 /**
  * The error every input-door rejection throws. Extends `Error`, sets `name` to
@@ -277,6 +277,17 @@ export const TextLayout = {
      *
      * Non-ASCII chars (`id >= 256`) contribute zero advance and reset the
      * kerning context -- same behavior as `BitmapFont.draw`.
+     *
+     * The range contract, stated once and drift-guarded byte-for-byte across the
+     * source docstring, `TextLayout.d.ts`, `llms.txt` and `README.md`
+     * (test/TextLayout.drift.test.js fails if any surface's wording drifts):
+     *
+     * RANGE-CONTRACT v1
+     * startIdx is inclusive and endIdx is exclusive, and both are indices into the original string.
+     * The breaking space is excluded from both sides.
+     * Leading whitespace is skipped only after a soft break; it is content at text start and immediately after an explicit newline.
+     * lineWidth is at the rendered scale and includes the ellipsis allowance on a FLAG_TRUNCATED line.
+     * END RANGE-CONTRACT
      *
      * @param {string} text                        Source text.
      * @param {{ glyphs: Int16Array, kerning: Int16Array }} font
