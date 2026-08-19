@@ -5,7 +5,7 @@ Zero-GC word wrapper for ASCII bitmap fonts. Computes line breaks, kerning-aware
 ## Key Facts
 
 - **Package**: `@zakkster/lite-text-layout`
-- **Version**: 1.2.2
+- **Version**: 1.3.0
 - **Bundle**: ~1.1 KB minified, ~0.6 KB gzipped
 - **Dependencies**: 0
 - **License**: MIT
@@ -210,6 +210,37 @@ Characters with `id >= 256` contribute zero advance and reset the kerning contex
 - **Single linear pass** over the string -- O(n) in text length.
 - **No internal state** -- `TextLayout` is a stateless singleton; safe to call from any context.
 - **Buffer reuse** -- one `Float32Array` can be reused across many `computeWrap` calls; the function never reads from positions it hasn't written this call.
+- **The allocation-free pair, end to end.** `computeWrap` writing into a buffer you own and bmfont's `drawWrapped` (`>= 1.6.0`) reading straight from it is 0 bytes/frame across the whole layout-to-glyphs pipeline -- neither half allocates per frame. The TL5 torture lane gates the pair together (`computeWrap` + `drawWrapped` over a wrapped paragraph): verdict pass, major 0, minor 0, 0 B/op. Measured on 1.3.0, node v26.3.1 arm64.
+
+<!--RUN-->
+```javascript
+import { BitmapFont } from '@zakkster/lite-bmfont';
+import { TextLayout } from '@zakkster/lite-text-layout';
+
+// The allocation-free PAIR. computeWrap writes ranges into a buffer you own;
+// bmfont's drawWrapped (>= 1.6.0) renders straight from it. Both halves
+// allocate nothing per frame, so layout-to-glyphs is 0 bytes/frame end to end.
+const font = new BitmapFont(atlasImage, fontJson);
+
+const text = 'Layout once, render every frame from the same buffer.';
+
+// Allocate the layout buffer ONCE, outside the frame loop.
+const layout = new Float32Array(64);
+
+// boxHeight 0 means never truncate -- the paragraph lays out in full.
+const lineCount = TextLayout.computeWrap(
+    text, font, /* boxWidth */ 240, /* boxHeight */ 0,
+    /* lineHeight */ font.lineHeight, layout, /* scale */ 1,
+);
+
+// One render frame: no computeWrap, no measureText, no split -- just re-blit
+// from the buffer. Repeating this call 60x a second allocates nothing.
+font.drawWrapped(
+    ctx, text, layout, lineCount,
+    /* box */ 240, 0, /* x */ 12, /* y */ 12,
+    /* scale */ 1, /* align */ 0, /* vAlign */ 0,
+);
+```
 
 ## Exported TypeScript Types
 
@@ -217,7 +248,7 @@ Characters with `id >= 256` contribute zero advance and reset the kerning contex
 export const FLAG_NORMAL: 0;
 export const FLAG_TRUNCATED: 1;
 export const FLAG_OVERFLOW: 2;
-export const VERSION: '1.2.2';
+export const VERSION: '1.3.0';
 
 // Law 6 -- flags are a value space; compare by equality, never by truthiness.
 export type LineFlag = typeof FLAG_NORMAL | typeof FLAG_TRUNCATED | typeof FLAG_OVERFLOW;

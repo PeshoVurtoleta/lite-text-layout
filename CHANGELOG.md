@@ -4,6 +4,61 @@ All notable changes to `@zakkster/lite-text-layout` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-19
+
+The allocation-free pipeline, proven end to end. `@zakkster/lite-bmfont` shipped
+both halves of the peer contract this session waited on: a public range width
+(`measureLine`, 1.4.0) and the scale reconciliation (F-45, 1.6.0, `drawWrapped`
+now compares `lineWidth` DIRECTLY to `boxWidth` with no `* scale`, adopting this
+package's rendered-scale contract). The bmfont devDependency floor moves from
+`^1.2.3` to `^1.6.0`, and the torture harness now gates `computeWrap` +
+`drawWrapped` together over a full wrapped paragraph at 0 bytes/frame. No runtime
+behaviour change: the only edit to `TextLayout.js` is the `VERSION` constant bump
+at release; the zero-allocation hot path is byte-identical to 1.2.2.
+
+### Added
+
+- **Allocation-free PAIR floor.** A new T6 torture lane (lane 4) runs the full
+  pipeline -- `computeWrap` into a reused `Float32Array`, then bmfont
+  `drawWrapped` (`>= 1.6.0`) rendering straight from that buffer through a
+  non-allocating recorder -- under both the rate gate (`maxMajor:0`, `maxMinor:0`,
+  `maxPauseMs:4`, `maxArrayBuffersGrowth:0`) and the alloc gate
+  (`maxBytesPerCall:0`). Result: major 0, minor 0, 0 B/op. The pair
+  `computeWrap` + bmfont `drawWrapped >= 1.6.0` is 0 bytes/frame end to end, so a
+  consumer can reason about which pairings are allocation-free.
+- **Pixel-identity lane (T8 section 6).** `drawWrapped` over a one-line RANGE
+  buffer is byte-identical (recorded dx) to the slicing oracle
+  `BF.draw(text.slice(s, e), ...)` over the seeded corpus, scale {0.5, 1, 2} x
+  align {0, 1, 2}. The measured render never slices; only the oracle does.
+- **T9 control 6 (double-scaled width)** activated: it feeds the shared
+  `alignMisses` detector the pre-1.6.0 `round(boxWidth - lineWidth * scale)`
+  formula and requires it to report the off-scale misses, proving the promoted
+  TL-25 assertion can still fail. It replaces the `todo('control-6', ...)`
+  placeholder.
+- A runnable end-to-end `<!--RUN-->` example (`computeWrap` -> `drawWrapped`) in
+  `README.md` and `llms.txt` stating the measured 0 B/frame number.
+
+### Changed
+
+- `@zakkster/lite-bmfont` devDependency floor `^1.2.3` -> `^1.6.0` (test-only,
+  both directions -- never a runtime dependency).
+- **TL-25 promoted** from a counted `knownFailing` entry to a LIVE assertion (T8
+  section 3): the recorded first-dx equals `round(boxWidth - lineWidth)` at scale
+  0.5, 1 AND 2. The harness prints `TL-25=live(0.5/1/2)`; `known-failing` returns
+  to 0.
+- **The measured width path no longer slices.** T8 sections 1 and 2 swap
+  `BF.measure(text.slice(s, e), scale)` for `BF.measureLine(text, s, e, scale)`,
+  so no `slice()` remains in the measured path (the only remaining slices are the
+  TL-28 and pixel-lane oracles, which may slice by contract).
+- `TEXTLAYOUT_TORTURE_BREAK` is now lane-selectable (`=1` targets T6 lane 1, `=4`
+  the TL5 pipeline lane); both still exit non-zero when the gate is proven able to
+  fail.
+
+### Fixed
+
+- `decisions/0003-scale-contract.md` marked RESOLVED: TL-25 is fixed in the peer
+  (bmfont 1.6.0 / F-45).
+
 ## [1.2.2] - 2026-08-18
 
 Documentation made to match the frozen surface. TL1, TL2 and TL3 moved the public

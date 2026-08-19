@@ -1,10 +1,25 @@
 # 0003 -- lineWidth is at the RENDERED scale (TL-25)
 
-Status: accepted
-Date: 2026-08-17
-Session: TL3 (v1.2.1)
+Status: RESOLVED (accepted TL3; closed in the peer TL5)
+Date: 2026-08-17 (resolved 2026-08-19)
+Session: TL3 (v1.2.1); resolved TL5 (v1.3.0)
 Findings: TL-25
 Related: decisions/0001-flag-overflow.md, decisions/0002-input-door.md
+
+## RESOLVED (TL5, 2026-08-19)
+
+TL-25 is fixed IN THE PEER, exactly as this record predicted. `@zakkster/lite-bmfont`
+1.6.0 (finding F-45) dropped the `* scale` from `drawWrapped`'s alignment terms:
+it now compares `lineWidth` DIRECTLY to `boxWidth` (`BitmapFont.js:1136-1137`,
+`(boxWidth - lineWidth) / 2` and `boxWidth - lineWidth`), adopting THIS package's
+rendered-scale contract; bmfont's Law now reads `lineWidth@render-scale`. TL5
+bumped the devDependency floor to `^1.6.0` and PROMOTED the T8 detector from
+`knownFailing('TL-25', ...)` to a live assertion: the recorded first-dx equals
+`round(boxWidth - lineWidth)` at scale 0.5, 1 AND 2 (`test/torture/t8-cross.mjs`,
+the hoisted `tl25`/`ALIGN_BW` at :146,152). T9 control 6 drives the SAME
+`alignMisses` detector with the pre-1.6.0 double-scaled formula and proves the
+promoted assertion still rejects it. `known-failing` is back to 0. Decision A
+below stands unchanged -- `TextLayout.js` never moved.
 
 ## Context
 

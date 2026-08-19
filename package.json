@@ -1,6 +1,6 @@
 {
   "name": "@zakkster/lite-text-layout",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "Zero-GC bitmap font word wrapper. Computes line breaks, kerning-aware widths, and truncation/ellipsis flags into a Float32Array -- feeds directly into @zakkster/lite-bmfont's drawWrapped.",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
   "license": "MIT",
@@ -61,7 +61,7 @@
     "node": ">=18"
   },
   "devDependencies": {
-    "@zakkster/lite-bmfont": "^1.2.3",
+    "@zakkster/lite-bmfont": "^1.6.0",
     "@zakkster/lite-gc-profiler": "^1.15.0",
     "@zakkster/lite-leak": "^1.8.1"
   },

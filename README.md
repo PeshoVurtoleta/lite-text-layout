@@ -287,7 +287,7 @@ views into one arena, which is correct code.
 | `FLAG_NORMAL`    | `0`       | Normal line.                                                    |
 | `FLAG_TRUNCATED` | `1`       | The TEXT did not fit the BOX; renderer appends `...`.           |
 | `FLAG_OVERFLOW`  | `2`       | The BUFFER did not fit the TEXT (a caller bug); set on the last written line. |
-| `VERSION`        | `'1.2.2'` | Package version string.                                         |
+| `VERSION`        | `'1.3.0'` | Package version string.                                         |
 
 **Law 6 -- flags are a value space; compare by equality, never by truthiness.**
 `if (flags === FLAG_TRUNCATED)`, never `if (flags)`. The domain may widen in a
@@ -404,6 +404,44 @@ run under `--expose-gc`) proves it:
   about **1.28 reads per character** on a narrow box (~836 lines). The rescan a
   reader of the loop might fear to be quadratic is a small constant factor.
   *Measured on 1.2.2, node v26.3.1 arm64.*
+
+**The allocation-free pair, end to end.** `computeWrap` writing into a buffer you
+own and bmfont's `drawWrapped` (`>= 1.6.0`) reading straight from it is 0
+bytes/frame across the whole layout-to-glyphs pipeline -- neither half allocates
+per frame, so a consumer can reason about which pairings are allocation-free.
+The TL5 torture lane gates the pair together (`computeWrap` + `drawWrapped` over
+a wrapped paragraph): verdict **pass**, **major 0, minor 0**, **0 B/op**.
+*Measured on 1.3.0, node v26.3.1 arm64.*
+
+<!--RUN-->
+```javascript
+import { BitmapFont } from '@zakkster/lite-bmfont';
+import { TextLayout } from '@zakkster/lite-text-layout';
+
+// The allocation-free PAIR. computeWrap writes ranges into a buffer you own;
+// bmfont's drawWrapped (>= 1.6.0) renders straight from it. Both halves
+// allocate nothing per frame, so layout-to-glyphs is 0 bytes/frame end to end.
+const font = new BitmapFont(atlasImage, fontJson);
+
+const text = 'Layout once, render every frame from the same buffer.';
+
+// Allocate the layout buffer ONCE, outside the frame loop.
+const layout = new Float32Array(64);
+
+// boxHeight 0 means never truncate -- the paragraph lays out in full.
+const lineCount = TextLayout.computeWrap(
+    text, font, /* boxWidth */ 240, /* boxHeight */ 0,
+    /* lineHeight */ font.lineHeight, layout, /* scale */ 1,
+);
+
+// One render frame: no computeWrap, no measureText, no split -- just re-blit
+// from the buffer. Repeating this call 60x a second allocates nothing.
+font.drawWrapped(
+    ctx, text, layout, lineCount,
+    /* box */ 240, 0, /* x */ 12, /* y */ 12,
+    /* scale */ 1, /* align */ 0, /* vAlign */ 0,
+);
+```
 
 </details>
 

@@ -12,14 +12,17 @@
  *     T0  metamorphic laws          T1  degenerate values
  *     T2  buffer capacity + type    T5  differential fuzz vs oracle
  *     T6  the zero-alloc gate       T7  soak + retention
- *     T8  cross-package (empty, TL3)   T9  controls (must be able to fail)
+ *     T8  cross-package (bmfont)    T9  controls (must be able to fail)
  *
  * lite-gc-profiler is one-measurement-at-a-time, so tiers run STRICTLY
  * SEQUENTIALLY -- never nested, never concurrent.
  *
- * Control: `TEXTLAYOUT_TORTURE_BREAK=1 node --expose-gc test/torture.mjs`
- * injects a retained allocation into the T6 hot loop and must exit non-zero.
- * A gate that cannot fail is decorative.
+ * Control: `TEXTLAYOUT_TORTURE_BREAK=<lane> node --expose-gc test/torture.mjs`
+ * injects a retained allocation into the selected T6 lane and must exit non-zero.
+ * `=1` targets lane 1 (computeWrap); `=4` targets the TL5 pipeline lane
+ * (computeWrap + bmfont drawWrapped). Lane 1 die()s at the end of its BREAK
+ * block, so the later lane needs its own selector to be reachable. A gate that
+ * cannot fail is decorative.
  *
  * Peers (lite-gc-profiler, lite-leak) are devDependencies only. TextLayout.js
  * has zero runtime dependencies.

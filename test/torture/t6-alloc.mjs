@@ -10,28 +10,35 @@
  * plus the structural assertion no heap gate substitutes for: out.buffer's
  * backing store byteLength is identical before and after both windows.
  *
- * TEXTLAYOUT_TORTURE_BREAK=1 injects a retained Float64Array(64) into the hot
- * body: both gates must then reject, and T6 die()s to force the non-zero exit
- * that proves the gate bites. Reaching the end of T6 with BREAK set is itself a
- * die().
+ * TEXTLAYOUT_TORTURE_BREAK=<lane> injects a retained Float64Array(64) into the
+ * SELECTED lane's hot body: both that lane's gates must then reject, and it die()s
+ * to force the non-zero exit that proves the gate bites. `=1` targets lane 1,
+ * `=4` targets the TL5 pipeline lane. Lane 1 die()s at the end of its BREAK block,
+ * so lane 4 needs its own selector to be reachable at all.
  *
- * Lane 2 (countLines) arrives in TL1: the same zero-alloc discipline over
+ * Lane 2 (countLines, TL1): the same zero-alloc discipline over
  * TextLayout.countLines, measured strictly AFTER lane 1 (never nested). A SINK
  * accumulator defeats dead-code elimination -- V8 may drop a call whose result is
  * discarded, and a dropped call passes as zero-alloc for the wrong reason. Lane 3
- * (doors on valid input) arrives in TL2 and stays a todo below.
+ * (doors on valid input, TL2) drives the full input-door comparison chain.
+ *
+ * Lane 4 (the allocation-free PIPELINE, TL5): computeWrap lays a full wrapped
+ * paragraph into the reused buffer, then bmfont's drawWrapped (>= 1.6.0) renders
+ * it through that buffer into a singleton non-allocating recorder -- 0 bytes/frame
+ * end to end, across the package boundary, under the SAME unrelaxed RULES.
  */
 
 import { TextLayout } from '../../TextLayout.js';
 import {
     FONT,
     TL20_TEXT,
-    BREAK,
+    BREAK_LANE,
     runOpsGate,
     runAllocGate,
     check,
     die,
 } from './harness.mjs';
+import { BF, REC_MIN } from './bmfixture.mjs';
 
 const OPS = 20000;
 const WARMUP = 1000;
@@ -49,7 +56,7 @@ let SINK = 0;
 export function run() {
     const hot = () => {
         TextLayout.computeWrap(TL20_TEXT, FONT, 200, 0, 16, out);
-        if (BREAK) leak.push(new Float64Array(64));
+        if (BREAK_LANE === 1) leak.push(new Float64Array(64));
     };
 
     const bufBytes = out.buffer.byteLength;
@@ -62,14 +69,14 @@ export function run() {
     check(out.buffer.byteLength === bufBytes,
         () => 'T6: out buffer backing store grew ' + bufBytes + ' -> ' + out.buffer.byteLength);
 
-    if (BREAK) {
+    if (BREAK_LANE === 1) {
         if (report.ok) {
-            die('T6: BREAK set but the ops gate accepted an allocating body -- the gate is blind');
+            die('T6 lane1: BREAK=1 set but the ops gate accepted an allocating body -- the gate is blind');
         }
         if (allocReport.verdict !== 'fail') {
-            die('T6: BREAK set but the alloc gate did not reject (verdict=' + allocReport.verdict + ')');
+            die('T6 lane1: BREAK=1 set but the alloc gate did not reject (verdict=' + allocReport.verdict + ')');
         }
-        die('T6: BREAK control confirmed -- both gates rejected the injected allocation');
+        die('T6 lane1: BREAK=1 control confirmed -- both gates rejected the injected allocation');
     }
 
     if (!report.ok) {
@@ -89,7 +96,7 @@ export function run() {
     // dead-code-eliminated call cannot pass as a zero-alloc call.
     const hot2 = () => {
         SINK += TextLayout.countLines(TL20_TEXT, FONT, 200, 0, 16);
-        if (BREAK) leak.push(new Float64Array(64));
+        if (BREAK_LANE === 1) leak.push(new Float64Array(64));
     };
 
     const { report: r2, summary: s2 } = runOpsGate(hot2, { ops: OPS, warmup: WARMUP });
@@ -122,7 +129,7 @@ export function run() {
     // deliberately accepts. Every argument below is VALID.
     const hot3 = () => {
         SINK += TextLayout.computeWrap(TL20_TEXT, FONT, 200, 64, 16, out, 2);
-        if (BREAK) leak.push(new Float64Array(64));
+        if (BREAK_LANE === 1) leak.push(new Float64Array(64));
     };
 
     const bufBytes3 = out.buffer.byteLength;
@@ -141,5 +148,56 @@ export function run() {
     if (a3.verdict !== 'pass') {
         die('T6 lane3 alloc gate rejected -- verdict=' + a3.verdict +
             ' bytesPerCall=' + allocs3.bytesPerCall + ' settled=' + allocs3.settled);
+    }
+
+    // -- Lane 4 (TL5): the ALLOCATION-FREE PIPELINE, end to end. The whole point
+    // of reporting [startIdx, endIdx) into the ORIGINAL string is that a renderer
+    // never has to slice(): computeWrap lays a full wrapped paragraph into the
+    // reused Float32Array, then bmfont's drawWrapped (>= 1.6.0) renders it through
+    // that buffer -- no per-frame allocation on EITHER side. REC_MIN is a
+    // singleton non-allocating recorder (drawImage only bumps `draws`, named
+    // params so V8 never materialises an `arguments` object), so the ctx is not a
+    // source of garbage and the gate measures the PEER's hot path as much as this
+    // one. Strictly AFTER lanes 1-3, never nested. RULES are NOT relaxed: the
+    // peer's drawWrapped must survive zero scavenges (maxMinor:0). If it cannot,
+    // the finding belongs to the peer and is filed there -- do not widen the gate.
+    const hot4 = () => {
+        const n = TextLayout.computeWrap(TL20_TEXT, BF, 200, 0, 16, out, 1);
+        BF.drawWrapped(REC_MIN, TL20_TEXT, out, n, 200, 0, 0, 0, 1, 2, 0);
+        SINK += REC_MIN.draws;
+        if (BREAK_LANE === 4) leak.push(new Float64Array(64));
+    };
+
+    const bufBytes4 = out.buffer.byteLength;
+    const { report: r4, summary: s4 } = runOpsGate(hot4, { ops: OPS, warmup: WARMUP });
+    const { report: a4, allocs: allocs4 } = runAllocGate(hot4, { iterations: ITERATIONS });
+
+    // Structural witness: the reused layout buffer's backing store did not grow.
+    check(out.buffer.byteLength === bufBytes4,
+        () => 'T6 lane4: out buffer backing store grew ' + bufBytes4 + ' -> ' + out.buffer.byteLength);
+    // Non-vacuity: drawWrapped must actually have drawn glyphs through REC_MIN, or
+    // a no-op peer would pass the gate for the wrong reason.
+    check(SINK > 0, () => 'T6 lane4: SINK is 0 -- drawWrapped drew nothing or the pipeline was optimised away');
+
+    if (BREAK_LANE === 4) {
+        if (r4.ok) {
+            die('T6 lane4: BREAK=4 set but the ops gate accepted an allocating body -- the gate is blind');
+        }
+        if (a4.verdict !== 'fail') {
+            die('T6 lane4: BREAK=4 set but the alloc gate did not reject (verdict=' + a4.verdict + ')');
+        }
+        die('T6 lane4: BREAK=4 control confirmed -- both gates rejected the injected allocation');
+    }
+
+    if (!r4.ok) {
+        const g = s4.gc;
+        die('T6 lane4 ops gate rejected -- verdict=' + r4.verdict + ' source=' + s4.source +
+            ' major=' + g.major + ' minor=' + g.minor + ' maxMs=' + g.maxMs.toFixed(3) +
+            ' -- if drawWrapped (>= 1.6.0) allocates under maxMinor:0 this is a PEER finding, not a gate to widen');
+    }
+    if (a4.verdict !== 'pass') {
+        die('T6 lane4 alloc gate rejected -- verdict=' + a4.verdict +
+            ' bytesPerCall=' + allocs4.bytesPerCall + ' settled=' + allocs4.settled +
+            ' -- a non-zero drawWrapped bytes/call is a PEER finding, not a gate to widen');
     }
 }

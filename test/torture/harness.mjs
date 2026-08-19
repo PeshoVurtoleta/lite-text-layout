@@ -40,8 +40,17 @@ export const SEED = (() => {
     return n === 0 ? 1 : n; // xorshift32 must not be seeded with 0
 })();
 
-/** Deliberately-broken control mode: injects a retained allocation into T6's hot loop. */
-export const BREAK = process.env.TEXTLAYOUT_TORTURE_BREAK === '1';
+/**
+ * Deliberately-broken control mode: injects a retained allocation into a T6 lane.
+ * `TEXTLAYOUT_TORTURE_BREAK=1` targets lane 1 (back-compat); `=4` targets the TL5
+ * pipeline lane. Lane selection is REQUIRED because t6-alloc lane 1 die()s at the
+ * end of its BREAK block, so a later-lane injection would be unreachable if every
+ * lane fired on the same flag. `BREAK` stays a boolean for the entry point's
+ * "the gate still passed" back-stop.
+ */
+const RAW = process.env.TEXTLAYOUT_TORTURE_BREAK;
+export const BREAK_LANE = RAW === '1' ? 1 : (Number(RAW) || 0);
+export const BREAK = BREAK_LANE > 0;
 
 /**
  * Base zero-GC rules. `maxArrayBuffersGrowth` needs measureOps `stabilize:'deep'`.

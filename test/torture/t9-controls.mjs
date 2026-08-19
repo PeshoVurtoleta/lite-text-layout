@@ -24,12 +24,12 @@
  *     T5 runs over every capped run -- must report a bad flags value and must
  *     report a both-flags output, and must report neither on a clean buffer.
  *
- * NUMBER-TO-NAME MAPPING. Index 6 is RESERVED for TL3 (double-scaled width) and
- * is deliberately skipped, and 7 is the whole-suite BREAK control, so TL2's
+ * NUMBER-TO-NAME MAPPING. Index 6 is the double-scaled-width control (TL5, live
+ * since the TL-25 promotion), and 7 is the whole-suite BREAK control, so TL2's
  * controls start at 8:
  *
  *     1 alloc gate            2 oracle comparator       3 agreement law
- *     4 overflow detector     5 freeze detector         6 RESERVED -- TL3
+ *     4 overflow detector     5 freeze detector         6 double-scaled width
  *     7 TEXTLAYOUT_TORTURE_BREAK (whole-suite, out of process)
  *     8 flags tripwire        9 the input door         10 the SHARED door
  *    11 the phantom line     12 the CRLF exclusion     13 CRLF on the trunc arm
@@ -49,9 +49,11 @@
 
 import { TextLayout, FLAG_OVERFLOW, FLAG_NORMAL, FLAG_TRUNCATED } from '../../TextLayout.js';
 import {
-    SEED, FONT, runOpsGate, check, die, todo, makePrng, makeCorpus, agreeCount,
+    SEED, FONT, runOpsGate, check, die, makePrng, makeCorpus, agreeCount,
     scanFlags, doorMisses, DOOR_ROWS, countPhantoms, crlfInRange,
 } from './harness.mjs';
+import { BF } from './bmfixture.mjs';
+import { alignMisses, tl25, ALIGN_BW } from './t8-cross.mjs';
 import { oracleWrap } from './oracle.mjs';
 import { linesDiverge } from './t5-fuzz.mjs';
 
@@ -312,6 +314,32 @@ export function run() {
         () => 'T9 control 13: the live truncating subject put the CR inside the emitted range ' +
             '(n=' + crTruncN + ' endIdx=' + crTruncLive[1] + ' flag=' + crTruncLive[3] + ')');
 
-    // Controls deferred to their session.
-    todo('control-6', 'double-scaled width -- lands in TL3');
+    // Control 6 (TL5) -- DOUBLE-SCALED WIDTH. The promoted TL-25 assertion (T8
+    // section 3) needs its control that proves it can still fail. The pre-1.6.0
+    // alignment math -- `round(ALIGN_BW - lineWidth * scale)` -- agrees with the
+    // rendered-scale left edge ONLY at scale 1; at 0.5 and 2 it double-scales the
+    // width. Feed the SHARED `alignMisses` detector (the SAME one the live T8
+    // assertion runs, never a private weaker copy) that old formula and require
+    // it to report at least the two off-scale misses. The clean direction -- the
+    // live peer placement through the same detector -- must report zero. A
+    // control cannot mutate the installed peer, so it drives the detector with
+    // the old formula LOCALLY.
+    const C6_OUT = new Float32Array(4 * 8);
+    const oldFormula = (scale) => {
+        TextLayout.computeWrap('AAAA BBBB', BF, 0, 0, 16, C6_OUT, scale);
+        const lineWidth = C6_OUT[2];
+        return {
+            actual: Math.round(ALIGN_BW - lineWidth * scale),   // pre-1.6.0, double-scaled
+            correct: Math.round(ALIGN_BW - lineWidth),
+        };
+    };
+    const oldMiss = alignMisses(oldFormula);
+    if (oldMiss < 2) {
+        die('T9 control 6: alignMisses reported ' + oldMiss + ' misses against the pre-1.6.0 ' +
+            'double-scaled width formula -- expected >= 2 (scale 0.5 and 2). The promoted TL-25 ' +
+            'assertion is vacuous and re-introducing lineWidth*scale would pass.');
+    }
+    check(alignMisses(tl25) === 0,
+        () => 'T9 control 6: the live peer placement reports ' + alignMisses(tl25) + ' misses -- ' +
+            'F-45 regressed (decisions/0003, 0006)');
 }
