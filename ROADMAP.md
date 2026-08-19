@@ -891,7 +891,7 @@ DONE WHEN
 ---
 package: "@zakkster/lite-text-layout"
 version_target: 1.2.1
-status: planned
+status: shipped          # 2026-08-18 (v1.2.1); brief archived briefs/TL3-shipped.md
 gc_maxMajor: 0
 gc_maxPauseMs: 4
 alloc_bytes_per_op: 0
@@ -1050,7 +1050,7 @@ DONE WHEN
 ---
 package: "@zakkster/lite-text-layout"
 version_target: 1.2.2
-status: planned
+status: shipped          # 2026-08-18 (v1.2.2); brief archived briefs/TL4-shipped.md
 gc_maxMajor: 0
 gc_maxPauseMs: 4
 alloc_bytes_per_op: 0
@@ -1144,7 +1144,7 @@ DONE WHEN
 ---
 package: "@zakkster/lite-text-layout"
 version_target: 1.3.0
-status: blocked
+status: shipped          # 2026-08-19 (v1.3.0); unblocked by bmfont 1.4.0 (measureLine) + 1.6.0 (F-45); TL-25 promoted, known-failing=0; brief archived briefs/TL5-shipped.md
 gc_maxMajor: 0
 gc_maxPauseMs: 4
 alloc_bytes_per_op: 0
@@ -1156,7 +1156,12 @@ depends_on: [TL3, "lite-bmfont Session 2"]
 
 # lite-text-layout -- close the loop when the peer can
 
-STATUS: BLOCKED. DO NOT START.
+STATUS: SHIPPED v1.3.0 (2026-08-19). The BLOCKED brief below is preserved as
+  the historical record; the peer shipped the public range API (bmfont 1.4.0
+  `measureLine`, 1.6.0 F-45), which discharged the block. The live brief is
+  briefs/TL5-shipped.md.
+
+  [HISTORICAL] STATUS: BLOCKED. DO NOT START.
   `@zakkster/lite-bmfont` is v1.2.0. Range-aware `measure`/`draw`/`layoutGlyphs`
   is its Session 2 and `layoutGlyphs` is its Session 1; NEITHER IS SHIPPED. Its
   `_measureRange(text, start, end, scale)` exists but is private, underscore-
