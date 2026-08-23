@@ -152,6 +152,7 @@ until the TL0 torture suite pinned it with a live, die-on-fix entry in
 | **TL-27** | S3 | **`countLines` has no loop bound, so a broken progress invariant hangs instead of failing.** `computeWrap`'s `if (lineCount >= maxLines) break;` is not only a capacity cap -- it is also the backstop that makes a non-advancing `lineStart` terminate with wrong output rather than spin forever. `countLines` deliberately omits it (there is no buffer to cap), so the same defect becomes an infinite loop. Not reachable in correct code: `lastSpace` is only set when `i > lineStart`, so `nextStart = lastSpace + 1 > lineStart` and `lineStart` strictly increases. But a hang is the worst failure mode under the fail-closed law -- no signal at all, and CI wedges rather than reporting. **Found by TL1's own drift mutation**, which is what the mutation was for. Two consequences: the torture entry point needs a watchdog so any future hang exits non-zero, and the termination invariant needs to be written where the next editor will see it. | delete the soft-break `lastSpace = -1;` from `countLines`, then `countLines('AAA   AAAAAA   AAA', F, 46, 0, 16)` never returns; the same mutation in `computeWrap` returns a wrong count and terminates |
 | **TL-26** | **S2** | **A phantom zero-width line appears when trailing whitespace soft-breaks immediately before a `\n`.** The package ships a pinned test named "does not emit a phantom trailing line for text ending in `\n`", and it passes -- for `'A\n'`. Add trailing spaces wide enough to force a soft break and the guarantee fails: the space-eater advances `lineStart` past the run, the `\n` branch then emits the empty span before it, and the caller gets a line with no content. Width-dependent, so the same text yields a different line count purely as a function of `boxWidth`. **Found by the TL0 torture suite** after the T5 corpus was widened to emit multi-space runs -- the first finding in this document produced by the gate rather than by a hand probe. Belongs to the TL2 whitespace family with TL-13 and TL-14. | `computeWrap('AAA  \n', F, 40, 0, 16, out)` -> 2, `[[0,3,36],[5,5,0]]`; `computeWrap('AAA\n', ...)` -> 1; `computeWrap('AAA  ', ...)` -> 1 |
 | **TL-25** | **S2** | **Cross-package scale is applied twice.** `computeWrap` multiplies every advance by `scale`, so `lineWidth` is already at the rendered scale. `BitmapFont.drawWrapped` then computes alignment as `boxWidth - lineWidth * scale` with a comment asserting "`lineWidth` is at scale=1 per contract" (`BitmapFont.js:295-299`). Passing the same `scale` to both -- which the README's own Full Example does, with `scale: 1`, where the bug is invisible -- mis-aligns every centred or right-aligned line by a factor of `scale`. Two packages hold two different beliefs about one number, which is exactly the failure the FORMAT contract exists to prevent. | `computeWrap('AAAA BBBB', F, 0,0,16,out, s)` -> `lineWidth` 51 / 102 / 204 for s = 0.5 / 1 / 2, each equal to the true rendered width. `drawWrapped` then uses `lineWidth * s` = 25.5 / 102 / 408 -- wrong by a factor of `s` at every scale but 1 |
+| **TL-28** | **S1** | **CLOSED v1.4.0 (TL6): decoded by feature-detecting `font.advanceOf` at the door (`0.0625` for 2.x, `1` for 1.x) and folding it into `s16 = scale * advScale` at all nine reads -- NOT the `FORMAT_VERSION` gate the FIX SHAPE below floated, because `FORMAT_VERSION` is a bmfont module export unreachable on the font instance. A 1.x font is byte-identical to 1.3.0. Sibling finding surfaced and pinned: a checked bmfont 2.x `drawWrapped` now THROWS on `FLAG_OVERFLOW` (F-49). --- Every advance and kerning value is read RAW from lite-bmfont's stores, so against bmfont >= 2.0.0 every computed width is EXACTLY 16x too large and wrap collapses silently.** bmfont 2.0.0 moved `glyphs[id * 7 + 6]` and the 64K kerning LUT to **1/16 FIXED POINT**, recovered with `stored * GLYPH_ADVANCE_SCALE` where `GLYPH_ADVANCE_SCALE === 0.0625`. This package never decodes: `TextLayout.js:341` (`dotAdvance`), `:377`/`:380` (the CR path), `:443`/`:442` and `:662`/`:661` (the two main advance+kerning accumulations), and `:515`/`:697` (the `cursorX` re-seed) all read the store directly and multiply only by `scale`. Measured 2026-08-22 against lite-bmfont 2.0.2: a 10-glyph string on a font with `xadvance` 10 gives `bmfont.measure` **100** and this package's `lineWidth` **1600** -- ratio EXACTLY 16 (raw slot 6 holds 160). A 306-character paragraph at `boxWidth` 560 wraps to **97 lines instead of 7**. There is no throw and no warning; the caller sees text collapsed to roughly three characters per line. **S1, not S2:** the package's single documented purpose is to emit the buffer lite-bmfont consumes (`llms.txt:3`, `package.json` description), and against the current major of that consumer it emits silently wrong geometry. That is corruption of the one output this library exists to produce, not merely a broken guarantee. **WHY BOTH TEST SUITES ARE GREEN.** This repo pins `"@zakkster/lite-bmfont": "^1.6.0"`, so npm installs a 1.x copy and every local test measures against the PRE-2.0 whole-pixel format. bmfont, for its part, added a deliberate boundary guard (`LiteBmfont/test/packaging.test.js:441`) asserting this repo's installed bmfont stays below 2.0.0 and reddening on purpose when it is bumped -- an honest guard that is currently green and correctly reports "the format has not crossed the boundary yet". Neither repo is internally wrong. The defect exists only in the GAP, where `@zakkster/lite-bmfont@2.0.1` and `@zakkster/lite-text-layout@1.3.0` are both live on npm and both READMEs advertise the pairing. Found 2026-08-22 from the lite-bmfont side while building a compound demo -- i.e. by USING the advertised integration, which is the only thing that catches this class. Filed there as **F-56**. **FIX SHAPE:** decode `stored * 0.0625` at all six sites, OR read the font's `FORMAT_VERSION` (bmfont exports it, value 2) and select the decode -- and FAIL CLOSED on a format version this package does not know, rather than assuming whole pixels. A version-gated decode is the honest one: it keeps 1.x fonts working and refuses an unknown future format instead of silently mis-scaling it. Whatever ships, it needs a fixture built from a REAL bmfont 2.x font, since a hand-written whole-pixel stub is exactly what hid this. | 10 glyphs @ `xadvance` 10 -> `bmfont.measure` **100**, raw `glyphs[65*7+6]` **160**, `computeWrap` `lineWidth` **1600**, ratio **16**; 306-char paragraph @ `boxWidth` 560 -> **97 lines** vs **7**; a whole-pixel Int16 adapter view restores agreement exactly (110 vs 110) |
 
 ### The one law that catches six of these at once
 
@@ -1335,3 +1336,67 @@ buffer would have passed, green, over a hole, for as long as anyone cared to
 look at it.
 
 MIT (c) Zahary Shinikchiev
+
+# TL6 -- lite-text-layout v1.4.0 -- decode the peer's 1/16 store (TL-28)
+===============================================================================
+
+```markdown
+---
+package: "@zakkster/lite-text-layout"
+version_target: 1.4.0
+status: shipped          # 2026-08-23 (v1.4.0). TL-28 closed by FEATURE DETECTION
+                         # (typeof font.advanceOf === 'function' -> 0.0625 else 1),
+                         # NOT the version-gating the brief floated: FORMAT_VERSION
+                         # is a bmfont MODULE export, unreachable on the font
+                         # instance, so a handshake was impossible. Fold matches
+                         # bmfont _measureRange (s16 = scale*0.0625) to the ULP.
+                         # bmfont devDep ^1.6.0 -> ^2.0.1; real 2.x fixtures; A1-A6
+                         # proven by applied sandbox mutation. Sibling finding: a
+                         # checked 2.x drawWrapped now THROWS on FLAG_OVERFLOW
+                         # (F-49), pinned in T8 s4, amended in decisions/0001.
+                         # Live brief: briefs/TL6.md.
+gc_maxMajor: 0
+gc_maxPauseMs: 4
+alloc_bytes_per_op: 0
+leak_cycles: 4096
+peers: ["@zakkster/lite-gc-profiler", "@zakkster/lite-leak", "@zakkster/lite-bmfont"]
+findings: [TL-28]
+depends_on: []
+---
+```
+
+THE LIVE BRIEF IS `briefs/TL6.md`. Read it before starting; the summary below
+exists so this roadmap stays self-describing, not as a substitute for it.
+
+PURPOSE
+  bmfont 2.0.0 moved the advance and kerning stores to 1/16 fixed point. This
+  package still reads them raw, so against any bmfont >= 2.0.0 font every width
+  is EXACTLY 16x too large and wrap collapses silently -- a 306-char paragraph
+  at boxWidth 560 becomes 97 lines instead of 7. Measured 2026-08-22 against
+  bmfont 2.0.2: a 10-glyph string at xadvance 10 gives bmfont.measure 100 and
+  this package 1600. Six read sites: TextLayout.js:341, :377/:380, :442/:443,
+  :515, :661/:662, :697.
+
+WHY IT WAS INVISIBLE
+  This repo pins bmfont ^1.6.0, so bmfixture.mjs builds a REAL BitmapFont in the
+  pre-2.0 whole-pixel format and the cross-package tier passes. The peer's own
+  boundary guard (LiteBmfont/test/packaging.test.js:441) pins THIS repo's
+  installed bmfont below 2.0.0 and is green and honest. Neither repo is wrong
+  internally; the defect exists only in the gap, where both packages are live
+  on npm and both READMEs advertise the pairing. Found from the bmfont side by
+  USING the pairing to build a compound demo. Filed there as F-56.
+
+FIX SHAPE
+  Feature-detect ONCE at entry, outside the loop:
+  `const advScale = (typeof font.advanceOf === 'function') ? 0.0625 : 1;`
+  and multiply all six reads by it. FORMAT_VERSION is NOT usable -- it is a
+  module export of bmfont, not an instance property, so a font.FORMAT_VERSION
+  check reads undefined forever. Verified: bmfont 1.6.0 has zero occurrences of
+  advanceOf / kernOf / GLYPH_ADVANCE_SCALE; 2.x has all three.
+
+FIRST TASK IS THE RED TEST
+  Bump the devDep to ^2.0.1 and install. T8 and the T6 lane-4 pipeline lane are
+  PREDICTED to redden immediately (predicted by the filer, not verified -- the
+  filer did not modify this repo's node_modules). If they do NOT redden, STOP:
+  the cross-package tier is not reading the peer's format and TL-28's blast
+  radius is larger than filed.

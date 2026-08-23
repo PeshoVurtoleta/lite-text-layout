@@ -54,7 +54,7 @@ export const FLAG_TRUNCATED = 1;
 export const FLAG_OVERFLOW = 2;
 
 /** Package version. Kept in sync with package.json and llms.txt. */
-export const VERSION = '1.3.0';
+export const VERSION = '1.4.0';
 
 /**
  * The error every input-door rejection throws. Extends `Error`, sets `name` to
@@ -81,6 +81,19 @@ export class TextLayoutError extends Error {
 const GLYPHS_MIN = 256 * 7;
 /** Minimum `font.kerning` length: the full 256 x 256 pair LUT. */
 const KERNING_MIN = 256 * 256;
+
+/**
+ * TL-28: `@zakkster/lite-bmfont` >= 2.0.0 stores glyph advance (slot 6) and
+ * kerning in 1/16 FIXED POINT; whole pixels are recovered with `stored * 0.0625`
+ * (bmfont's exported `GLYPH_ADVANCE_SCALE`). A 1.x font stores whole pixels and
+ * needs a factor of 1. This package reads those two stores raw, so a 2.x font
+ * left undecoded makes every width exactly 16x too large and collapses wrapping
+ * silently. The factor is detected ONCE at the door (see `validateInput`) and
+ * folded into a per-call `scale * advScale`, mirroring bmfont's own
+ * `_measureRange` (`s16 = scale * 0.0625`) so the two packages agree to the ULP.
+ * decisions/0005-bmfont-fixed-point.md.
+ */
+const BMFONT_ADVANCE_SCALE_2X = 0.0625;
 
 /**
  * Name a received value for an error message. Cold path only.
@@ -113,13 +126,18 @@ function typeName(v) {
  * Every check runs ONCE, here, before the loop. Not one of them enters the
  * per-character body, and the table lengths are read here and never again.
  *
+ * Returns the fixed-point decode factor for `font`'s advance/kerning stores
+ * (TL-28): `0.0625` for a bmfont >= 2.0.0 font, `1` for a 1.x or hand-rolled
+ * whole-pixel font. Detected here, in the ONE shared door, so `computeWrap` and
+ * `countLines` can never disagree about how to read the peer's stores.
+ *
  * @param {string} text
  * @param {{ glyphs: Int16Array, kerning: Int16Array }} font
  * @param {number} boxWidth
  * @param {number} boxHeight
  * @param {number} lineHeight
  * @param {number} scale
- * @returns {void}
+ * @returns {number} The advance/kerning decode factor (`0.0625` or `1`).
  * @throws {TextLayoutError}
  */
 function validateInput(text, font, boxWidth, boxHeight, lineHeight, scale) {
@@ -198,6 +216,16 @@ function validateInput(text, font, boxWidth, boxHeight, lineHeight, scale) {
         throw new TextLayoutError(
             'scale must be > 0; received ' + String(scale) + '.');
     }
+
+    // TL-28: feature-detect the store format. `FORMAT_VERSION` and
+    // `GLYPH_ADVANCE_SCALE` are MODULE exports of bmfont, absent from the
+    // duck-typed `{ glyphs, kerning }` this package receives (verified against
+    // 1.6.0 and 2.0.2), so a `font.FORMAT_VERSION` check would read `undefined`
+    // forever and silently pick the wrong branch. The only instance-reachable
+    // signal is the 2.x accessor `advanceOf`: bmfont 1.6.0 has zero occurrences
+    // of it; 2.x carries it on the prototype. See decisions/0005 for the
+    // fail-closed argument and the rejected alternatives.
+    return (typeof font.advanceOf === 'function') ? BMFONT_ADVANCE_SCALE_2X : 1;
 }
 
 export const TextLayout = {
@@ -306,7 +334,7 @@ export const TextLayout = {
      *   same-realm `Float32Array`.
      */
     computeWrap(text, font, boxWidth, boxHeight, lineHeight, outBuffer, scale = 1.0) {
-        validateInput(text, font, boxWidth, boxHeight, lineHeight, scale);
+        const advScale = validateInput(text, font, boxWidth, boxHeight, lineHeight, scale);
         if (!(outBuffer instanceof Float32Array)) {
             throw new TextLayoutError(
                 'outBuffer must be a Float32Array; received ' + typeName(outBuffer) +
@@ -335,10 +363,18 @@ export const TextLayout = {
         let cursorX = 0;
         let prevId = -1;
 
+        // TL-28: fold the store-decode factor into the scale ONCE, exactly as
+        // bmfont's `_measureRange` does (`s16 = scale * 0.0625`). Every read of
+        // the advance/kerning stores below uses `s16`; caller-space geometry
+        // (`lineHeight * scale`) keeps raw `scale`, or lines would shrink 16x.
+        // For a 1.x font `advScale` is 1, so `s16 === scale` exactly and output
+        // is byte-identical to pre-TL-28.
+        const s16 = scale * advScale;
+
         // Precompute ellipsis geometry (ASCII 46 is '.'). If the glyph isn't in
         // the atlas its `width` is 0 -> treat ellipsis as 0px (no truncation marker).
         const dotPtr = 46 * 7;
-        const dotAdvance = font.glyphs[dotPtr + 2] > 0 ? font.glyphs[dotPtr + 6] * scale : 0;
+        const dotAdvance = font.glyphs[dotPtr + 2] > 0 ? font.glyphs[dotPtr + 6] * s16 : 0;
         const ellipsisWidth = dotAdvance * 3;
 
         // Latest position on the current line where "content up to and
@@ -374,10 +410,10 @@ export const TextLayout = {
                 // kerns when the preceding id is ASCII and on this line.
                 let crAdv = 0;
                 if (crlf) {
-                    crAdv = font.glyphs[13 * 7 + 6] * scale;
+                    crAdv = font.glyphs[13 * 7 + 6] * s16;
                     const beforeCr = (i - 2 >= lineStart) ? text.charCodeAt(i - 2) : -1;
                     if (beforeCr >= 0 && beforeCr < 256) {
-                        crAdv += font.kerning[(beforeCr << 8) | 13] * scale;
+                        crAdv += font.kerning[(beforeCr << 8) | 13] * s16;
                     }
                 }
 
@@ -439,8 +475,8 @@ export const TextLayout = {
             // -- 2. Glyph advance + kerning ----------------------------------
             let advance = 0;
             if (id >= 0 && id < 256) {
-                if (prevId !== -1) advance += font.kerning[(prevId << 8) | id] * scale;
-                advance += font.glyphs[id * 7 + 6] * scale;
+                if (prevId !== -1) advance += font.kerning[(prevId << 8) | id] * s16;
+                advance += font.glyphs[id * 7 + 6] * s16;
             }
 
             // -- 3. Track the latest "content + ellipsis still fits" position.
@@ -512,7 +548,7 @@ export const TextLayout = {
 
                 // Re-seed cursorX with just this glyph's xadvance (no
                 // inherited kerning from the line we just flushed).
-                cursorX = (id >= 0 && id < 256) ? font.glyphs[id * 7 + 6] * scale : 0;
+                cursorX = (id >= 0 && id < 256) ? font.glyphs[id * 7 + 6] * s16 : 0;
                 prevId = (id >= 0 && id < 256) ? id : -1;
 
                 // Track this as a safe ellipsis position too, since it's the
@@ -595,7 +631,7 @@ export const TextLayout = {
      *   check, which has no argument to check here.
      */
     countLines(text, font, boxWidth, boxHeight, lineHeight, scale = 1.0) {
-        validateInput(text, font, boxWidth, boxHeight, lineHeight, scale);
+        const advScale = validateInput(text, font, boxWidth, boxHeight, lineHeight, scale);
         // The same zero-line policy as computeWrap, deliberately duplicated.
         if (boxHeight > 0 && lineHeight * scale > boxHeight) return 0;
 
@@ -609,6 +645,11 @@ export const TextLayout = {
 
         let cursorX = 0;
         let prevId = -1;
+
+        // TL-28: the same store-decode fold as computeWrap. countLines is a
+        // SEPARATE pass (decisions/0005 A5), so it must decode independently or
+        // the two entry points disagree against a 2.x font.
+        const s16 = scale * advScale;
 
         // TERMINATION INVARIANT (TL-27): a soft break advances `lineStart` to
         // `lastSpace + 1`, and `lastSpace` is only ever set at `i > lineStart`
@@ -658,8 +699,8 @@ export const TextLayout = {
             // -- 2. Glyph advance + kerning ----------------------------------
             let advance = 0;
             if (id >= 0 && id < 256) {
-                if (prevId !== -1) advance += font.kerning[(prevId << 8) | id] * scale;
-                advance += font.glyphs[id * 7 + 6] * scale;
+                if (prevId !== -1) advance += font.kerning[(prevId << 8) | id] * s16;
+                advance += font.glyphs[id * 7 + 6] * s16;
             }
 
             // Mark soft-break candidate.
@@ -694,7 +735,7 @@ export const TextLayout = {
                 lastSpace = -1;
                 prevId = -1;
 
-                cursorX = (id >= 0 && id < 256) ? font.glyphs[id * 7 + 6] * scale : 0;
+                cursorX = (id >= 0 && id < 256) ? font.glyphs[id * 7 + 6] * s16 : 0;
                 prevId = (id >= 0 && id < 256) ? id : -1;
                 continue;
             }

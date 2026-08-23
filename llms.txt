@@ -1,17 +1,18 @@
 # @zakkster/lite-text-layout
 
-Zero-GC word wrapper for ASCII bitmap fonts. Computes line breaks, kerning-aware widths, and truncation/ellipsis flags into a caller-owned `Float32Array`. The output is exactly the layout buffer that `@zakkster/lite-bmfont`'s `BitmapFont.drawWrapped` consumes -- compute layout once, re-render every frame for free.
+Zero-GC word wrapper for ASCII bitmap fonts. Computes line breaks, kerning-aware widths, and truncation/ellipsis flags into a caller-owned `Float32Array`. The output is exactly the layout buffer that `@zakkster/lite-bmfont`'s `BitmapFont.drawWrapped` consumes -- compute layout once, re-render every frame for free. Supports lite-bmfont 1.x and >= 2.0.0: 2.0.0 moved advance and kerning to 1/16 fixed point, and this package decodes it by feature-detecting the font's `advanceOf` accessor, so a 1.x font and a 2.x font lay out identically. No runtime dependency in either direction.
 
 ## Key Facts
 
 - **Package**: `@zakkster/lite-text-layout`
-- **Version**: 1.3.0
+- **Version**: 1.4.0
 - **Bundle**: ~1.1 KB minified, ~0.6 KB gzipped
 - **Dependencies**: 0
 - **License**: MIT
 - **Format**: ES Module (single file)
 - **TypeScript**: Full `.d.ts` included
 - **Companion**: `@zakkster/lite-bmfont` (renderer; consumes this package's output)
+- **bmfont compatibility**: lite-bmfont 1.x and 2.x. Advance/kerning widths are decoded per format (2.0.0+ stores 1/16 fixed point) via feature detection, not a version handshake -- `FORMAT_VERSION` is a bmfont module export, not reachable on the font instance this package receives.
 
 ## Design Tenets
 
@@ -210,7 +211,7 @@ Characters with `id >= 256` contribute zero advance and reset the kerning contex
 - **Single linear pass** over the string -- O(n) in text length.
 - **No internal state** -- `TextLayout` is a stateless singleton; safe to call from any context.
 - **Buffer reuse** -- one `Float32Array` can be reused across many `computeWrap` calls; the function never reads from positions it hasn't written this call.
-- **The allocation-free pair, end to end.** `computeWrap` writing into a buffer you own and bmfont's `drawWrapped` (`>= 1.6.0`) reading straight from it is 0 bytes/frame across the whole layout-to-glyphs pipeline -- neither half allocates per frame. The TL5 torture lane gates the pair together (`computeWrap` + `drawWrapped` over a wrapped paragraph): verdict pass, major 0, minor 0, 0 B/op. Measured on 1.3.0, node v26.3.1 arm64.
+- **The allocation-free pair, end to end.** `computeWrap` writing into a buffer you own and bmfont's `drawWrapped` (`>= 1.6.0`) reading straight from it is 0 bytes/frame across the whole layout-to-glyphs pipeline -- neither half allocates per frame. The TL5 torture lane gates the pair together (`computeWrap` + `drawWrapped` over a wrapped paragraph): verdict pass, major 0, minor 0, 0 B/op. Measured on 1.4.0, node v26.3.1 arm64.
 
 <!--RUN-->
 ```javascript
@@ -248,7 +249,7 @@ font.drawWrapped(
 export const FLAG_NORMAL: 0;
 export const FLAG_TRUNCATED: 1;
 export const FLAG_OVERFLOW: 2;
-export const VERSION: '1.3.0';
+export const VERSION: '1.4.0';
 
 // Law 6 -- flags are a value space; compare by equality, never by truthiness.
 export type LineFlag = typeof FLAG_NORMAL | typeof FLAG_TRUNCATED | typeof FLAG_OVERFLOW;

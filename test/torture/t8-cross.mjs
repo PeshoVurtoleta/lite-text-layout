@@ -15,7 +15,7 @@
  *   1. Width agreement, ASCII-SCOPED (decisions/0004): for every line of a
  *      wrapped corpus, `lineWidth === font.measureLine(text, s, e, scale)` within
  *      one f32 ulp, for scale in {0.5, 1, 2}. NO slice in the measured path (TL5,
- *      bmfont 1.4.0). ASCII-only BY DECISION -- TL-28 is where the two packages
+ *      bmfont 1.4.0). ASCII-only BY DECISION -- the non-ASCII kerning seam (section 5) is where the two packages
  *      legitimately disagree and it is carved out in section 5.
  *   2. The truncated-line exception (TL-12): on a FLAG_TRUNCATED line the
  *      difference between `lineWidth` and the measured content is EXACTLY
@@ -28,7 +28,7 @@
  *   4. Format conformance: stride 4, slot order [startIdx, endIdx, lineWidth,
  *      flags], and `drawWrapped` keys the ellipsis on FLAG_ELLIPSIS bit 0, so
  *      FLAG_OVERFLOW (2) is inert there -- an overflow line draws no ellipsis.
- *   5. The TL-28 probe (decisions/0004): a single non-ASCII case documenting the
+ *   5. The kerning-seam probe (decisions/0004): a single non-ASCII case documenting the
  *      kerning-reset seam as DEFINED divergence, NOT a they-agree assertion. The
  *      ONLY remaining slice in this tier -- an oracle slice, pinned to measure's
  *      cross-realm bridging.
@@ -47,7 +47,7 @@
 import { TextLayout, FLAG_NORMAL, FLAG_TRUNCATED, FLAG_OVERFLOW } from '../../TextLayout.js';
 import { BitmapFont } from '@zakkster/lite-bmfont';
 import { SEED, check, die, makePrng, makeCorpus } from './harness.mjs';
-import { BF, DOT_XADVANCE, makeCtx, DX, DX2, DX_CTX, DX_CTX2 } from './bmfixture.mjs';
+import { BF, BF_1X, DOT_XADVANCE, makeCtx, DX, DX2, DX_CTX, DX_CTX2 } from './bmfixture.mjs';
 import { widthClose } from './t5-fuzz.mjs';
 
 const SCALES = [0.5, 1, 2];
@@ -101,7 +101,7 @@ export function run() {
     // -- Section 1: width agreement, ASCII-scoped (bh=0, non-truncating) ------
     // The corpus is harness.makeCorpus, whose alphabet is ASCII letters, space
     // and CRLF -- every id < 256, so it is ASCII-scoped BY CONSTRUCTION and the
-    // TL-28 seam (id >= 256) never appears. The CR is excluded from every emitted
+    // non-ASCII kerning seam (id >= 256) never appears. The CR is excluded from every emitted
     // range, so no slice ever contains one. A DIFFERENT prng stream than T0/T5 so
     // this corpus is its own 200 cases.
     const corpus = makeCorpus(makePrng(SEED ^ 0x7f4a7c15), 200);
@@ -126,6 +126,37 @@ export function run() {
                         ' lineWidth ' + lineWidth + ' != measureLine(range) ' + measured +
                         ' slice=[' + startIdx + ',' + endIdx + ']');
                 lines++;
+            }
+        }
+    }
+
+    // -- Section 1b: the 1.x regression witness (TL-28 / A3) ------------------
+    // BF is a REAL 2.x font (store 192, decoded * 0.0625 -> 12px). BF_1X is the
+    // SAME logical font in 1.x whole-pixel form (store 12, and NO advanceOf
+    // accessor). computeWrap must read BF through advScale 0.0625 and BF_1X
+    // through advScale 1 and land on the SAME 12px, so every line range and every
+    // width slot is BYTE-IDENTICAL across the two fonts. 192 * (scale * 0.0625)
+    // and 12 * (scale * 1) are the same IEEE double per glyph (0.0625 is exact,
+    // 192/16 == 12), so the equality is exact, not approximate. This is the
+    // assertion that proves the decode is a FIX, not a second breakage pointed the
+    // other way: forcing advScale = 0.0625 unconditionally makes BF_1X read
+    // 0.75px and this equality reddens (T9 owns that mutation control).
+    const OUT_1X = new Float32Array(OUT.length);
+    for (let ci = 0; ci < corpus.length; ci++) {
+        const text = corpus[ci].text;
+        const boxWidth = corpus[ci].boxWidth;
+        for (let si = 0; si < SCALES.length; si++) {
+            const scale = SCALES[si];
+            const n2 = TextLayout.computeWrap(text, BF, boxWidth, 0, 16, OUT, scale);
+            const n1 = TextLayout.computeWrap(text, BF_1X, boxWidth, 0, 16, OUT_1X, scale);
+            check(n1 === n2,
+                () => 'T8 A3 1.x/2.x line count: case ' + ci + ' scale ' + scale +
+                    ' 1.x=' + n1 + ' 2.x=' + n2 + ' -- the TL-28 decode changed wrapping vs a whole-pixel font');
+            for (let k = 0; k < n2 * 4; k++) {
+                check(OUT_1X[k] === OUT[k],
+                    () => 'T8 A3 1.x/2.x slot ' + k + ' differs: case ' + ci + ' scale ' + scale +
+                        ' 1.x=' + OUT_1X[k] + ' 2.x=' + OUT[k] +
+                        ' -- a 1.x font is NOT byte-identical after the TL-28 decode');
             }
         }
     }
@@ -178,52 +209,86 @@ export function run() {
 
     // -- Section 4: format conformance ----------------------------------------
     // Stride 4 and the slot order [startIdx, endIdx, lineWidth, flags] are what
-    // drawWrapped reads (BitmapFont.js:467-470, four ptr++ in that order). The
-    // executable proof: drawWrapped draws the ellipsis under `if (flags === 1)`
-    // (equality, BitmapFont.js:514), so a FLAG_TRUNCATED (1) line gets three
-    // extra dot glyphs and a FLAG_OVERFLOW (2) line gets NONE -- the 2 is inert.
-    // A hand-built two-line buffer proves both directions in one draw.
+    // drawWrapped reads (four ptr++ in that order). The ellipsis fires on bit 0
+    // (FLAG_ELLIPSIS === FLAG_TRUNCATED === 1) via `f & FLAG_ELLIPSIS` after a
+    // flags-mask door (BitmapFont.js:1354-1366, F-49), NOT the old `flags === 1`.
     check(FLAG_NORMAL === 0 && FLAG_TRUNCATED === 1 && FLAG_OVERFLOW === 2,
         () => 'T8 format: flag constants moved (' + FLAG_NORMAL + '/' + FLAG_TRUNCATED + '/' + FLAG_OVERFLOW +
-            ') -- drawWrapped keys the ellipsis on flags===1');
-    // Line 0: 'AAA' FLAG_TRUNCATED -> 3 glyphs + 3 ellipsis dots = 6 draws.
-    // Line 1: 'BBB' FLAG_OVERFLOW  -> 3 glyphs + 0 (inert)        = 3 draws.
-    const fmtBuf = new Float32Array(8);
-    fmtBuf.set([0, 3, 36, FLAG_TRUNCATED, 4, 7, 36, FLAG_OVERFLOW]);
-    const fmtCtx = makeCtx();
-    BF.drawWrapped(fmtCtx, 'AAA BBB', fmtBuf, 2, 0, 0, 0, 0, 1, 0, 0);
-    check(fmtCtx.draws === 9,
-        () => 'T8 format: drawWrapped drew ' + fmtCtx.draws + ' glyphs, expected 9 (3+3 ellipsis on the ' +
-            'FLAG_TRUNCATED line, 3+0 on the inert FLAG_OVERFLOW line) -- flags===1 equality or stride broke');
-    // And the OVERFLOW-only direction: a lone FLAG_OVERFLOW line draws no dots.
-    const ovBuf = new Float32Array(4);
-    ovBuf.set([0, 3, 36, FLAG_OVERFLOW]);
-    const ovCtx = makeCtx();
-    BF.drawWrapped(ovCtx, 'AAA', ovBuf, 1, 0, 0, 0, 0, 1, 0, 0);
-    check(ovCtx.draws === 3,
-        () => 'T8 format: a FLAG_OVERFLOW line drew ' + ovCtx.draws + ' glyphs, expected 3 -- the 2 is not ' +
-            'inert, drawWrapped must be branching on truthiness not flags===1');
+            ') -- drawWrapped keys the ellipsis on bit 0 (FLAG_ELLIPSIS)');
 
-    // -- Section 5: the TL-28 probe (decisions/0004) --------------------------
-    // The kerning-reset seam. computeWrap RESETS the kerning context on any id
-    // >= 256; bmfont's measure BRIDGES it. This is DEFINED divergence, scoped out
-    // of section 1 on purpose. Font: A/B advance 12, kern(A,B) = -5. Text is
-    // 'A' + U+20AC (EURO) + 'B'. NOT a they-agree assertion -- both sides are
-    // pinned to their OWN documented number so a change on either side trips.
-    const kg = new Int16Array(256 * 7);
-    kg[65 * 7 + 6] = 12; kg[66 * 7 + 6] = 12;
-    const kk = new Int16Array(65536);
-    kk[(65 << 8) | 66] = -5;
-    const kfont = Object.create(BitmapFont.prototype);
-    kfont.glyphs = kg; kfont.kerning = kk; kfont.atlas = {}; kfont.base = 0; kfont.lineHeight = 16;
+    // FLAG_TRUNCATED (bit 0, inside the mask) draws the ellipsis: 'AAA' -> 3
+    // glyphs + 3 dots = 6. BF's '.' carries a 1x1 cell so the dots fire.
+    const truncBuf = new Float32Array([0, 3, 36, FLAG_TRUNCATED]);
+    const truncCtx = makeCtx();
+    BF.drawWrapped(truncCtx, 'AAA', truncBuf, 1, 0, 0, 0, 0, 1, 0, 0);
+    check(truncCtx.draws === 6,
+        () => 'T8 format: FLAG_TRUNCATED line drew ' + truncCtx.draws + ' glyphs, expected 6 (3+3 ellipsis) ' +
+            '-- the bit-0 ellipsis path or the stride broke');
+
+    // FLAG_OVERFLOW (bit 1) against bmfont >= 2.0.0 -- a TWO-PART contract, and
+    // NOT the 1.x "silently inert" story decisions/0001 was written against.
+    // bmfont 2.0 (F-49) added a flags-mask door: a bit outside FLAG_MASK (1) is a
+    // caller error. See TL6's sub-finding note in decisions/0001-flag-overflow.md.
+    const ovBuf = new Float32Array([0, 3, 36, FLAG_OVERFLOW]);
+    //   (a) DEFAULT (checked) font: drawWrapped THROWS on FLAG_OVERFLOW. This is
+    //       fail-closed and it AGREES with this package -- an overflow flag means
+    //       the caller under-sized the buffer (size it with countLines), and a
+    //       checked peer refuses to render a layout it was told is incomplete.
+    let ovThrew = false;
+    try {
+        BF.drawWrapped(makeCtx(), 'AAA', ovBuf, 1, 0, 0, 0, 0, 1, 0, 0);
+    } catch (e) {
+        ovThrew = !!e && (e.name === 'BitmapFontError' || /flags/.test(e.message));
+    }
+    check(ovThrew,
+        () => 'T8 format: a checked bmfont 2.x drawWrapped did NOT throw on FLAG_OVERFLOW -- the F-49 ' +
+            'flags-mask door (BitmapFont.js:1363) is the fail-closed half of the overflow contract');
+    //   (b) A checked:false font keeps the 1.x additive semantics: FLAG_OVERFLOW
+    //       is IGNORED -- no ellipsis, 3 draws. So the FLAG_OVERFLOW === 2 choice
+    //       stays additive wherever the caller opts out of the door.
+    const lenient = new BitmapFont({}, {
+        common: { lineHeight: 16, base: 0 },
+        chars: [{ id: 65, x: 0, y: 0, width: 1, height: 1, xoffset: 0, yoffset: 0, xadvance: 12 }],
+    }, { checked: false });
+    const ovCtx = makeCtx();
+    lenient.drawWrapped(ovCtx, 'AAA', ovBuf, 1, 0, 0, 0, 0, 1, 0, 0);
+    check(ovCtx.draws === 3,
+        () => 'T8 format: a checked:false FLAG_OVERFLOW line drew ' + ovCtx.draws + ' glyphs, expected 3 ' +
+            '(inert) -- the additive-value path under an opted-out door broke');
+
+    // -- Section 5: the non-ASCII kerning-seam probe (decisions/0004) ----------
+    // NOTE on the name: this seam was labelled "TL-28" in TL3 (decisions/0004,
+    // shipped 1.2.1). The ROADMAP later assigned TL-28 to a DIFFERENT finding --
+    // the bmfont 1/16 fixed-point decode (decisions/0005, closed in TL6). To end
+    // the collision this probe is named for the seam it tests, not a TL number.
+    //
+    // The seam: computeWrap RESETS the kerning context on any id >= 256; bmfont's
+    // measure BRIDGES it. DEFINED divergence, scoped out of section 1 on purpose.
+    // Font: A/B advance 12, kern(A,B) = -5, text 'A' + U+20AC (EURO) + 'B'. NOT a
+    // they-agree assertion -- both sides are pinned to their OWN documented number
+    // so a change on either side trips.
+    //
+    // Built through the REAL 2.x constructor (the decode, decisions/0005) so the
+    // store is fixed-point (12 -> 192, -5 -> -80) and both packages decode at full
+    // magnitude. A hand-poked whole-pixel table on BitmapFont.prototype would
+    // decode 16x too small and the 24/19 pins below -- calibrated in whole pixels
+    // -- would silently measure nothing.
+    const kfont = new BitmapFont({}, {
+        common: { lineHeight: 16, base: 0 },
+        chars: [
+            { id: 65, x: 0, y: 0, width: 1, height: 1, xoffset: 0, yoffset: 0, xadvance: 12 },
+            { id: 66, x: 0, y: 0, width: 1, height: 1, xoffset: 0, yoffset: 0, xadvance: 12 },
+        ],
+        kernings: [{ first: 65, second: 66, amount: -5 }],
+    });
     const EURO = '\u20AC';
     const probe = 'A' + EURO + 'B';
     const pn = TextLayout.computeWrap(probe, kfont, 0, 0, 16, OUT, 1);
     check(pn === 1 && OUT[2] === 24,
-        () => 'T8 TL-28 probe: computeWrap lineWidth ' + OUT[2] + ' (n=' + pn + '), expected 24 -- ' +
+        () => 'T8 kerning-seam probe: computeWrap lineWidth ' + OUT[2] + ' (n=' + pn + '), expected 24 -- ' +
             'the >= 256 kerning-context RESET changed; decisions/0004 is stale');
     check(kfont.measure(probe.slice(OUT[0], OUT[1]), 1) === 19,
-        () => 'T8 TL-28 probe: bmfont measure ' + kfont.measure(probe.slice(OUT[0], OUT[1]), 1) +
+        () => 'T8 kerning-seam probe: bmfont measure ' + kfont.measure(probe.slice(OUT[0], OUT[1]), 1) +
             ', expected 19 (A+B-5, kern bridges the EURO) -- bmfont changed its non-ASCII policy');
 
     // -- Section 6: pixel identity, drawWrapped(range) vs draw(slice) (TL5) ----
@@ -277,7 +342,93 @@ export function run() {
         die('T8 pixel identity: recorded 0 dx over the whole corpus -- the identity lane is vacuous');
     }
 
+    // -- Section 7: TL-28 decode-site coverage (A1/A4/A5 falsifiable) ----------
+    // The TL-28 fold touches NINE store reads. Section 1 drives the plain advance
+    // (:443); the kerning reads (:442/:661), the CR-path reads (:377/:380) and the
+    // countLines twins (:662/:697) need cases section 1 (unkerned, CR-advance 0,
+    // computeWrap-only) never exercises. Each assertion below reddens when its
+    // site is left un-decoded -- proven by the sandbox mutation matrix in TL6.
+    let decodeChecks = 0;
+
+    // (A1, kerned) A real ASCII kerning pair drives the kerning decode :442 AND
+    // the advance decode :443. 'ABAB' = 4*12 + 3*(-5) = 33 at scale 1.
+    const kern2x = new BitmapFont({}, {
+        common: { lineHeight: 16, base: 0 },
+        chars: [
+            { id: 65, x: 0, y: 0, width: 1, height: 1, xoffset: 0, yoffset: 0, xadvance: 12 },
+            { id: 66, x: 0, y: 0, width: 1, height: 1, xoffset: 0, yoffset: 0, xadvance: 12 },
+        ],
+        kernings: [{ first: 65, second: 66, amount: -5 }, { first: 66, second: 65, amount: -5 }],
+    });
+    for (let si = 0; si < SCALES.length; si++) {
+        const scale = SCALES[si];
+        const kn = TextLayout.computeWrap('ABAB', kern2x, 0, 0, 16, OUT, scale);
+        const km = kern2x.measureLine('ABAB', 0, 4, scale);
+        check(kn === 1 && widthClose(OUT[2], km),
+            () => 'T8 A1 kerned: computeWrap lineWidth ' + OUT[2] + ' != measureLine ' + km +
+                ' at scale ' + scale + ' -- the kerning decode (:442) or advance decode (:443) is un-folded');
+        decodeChecks++;
+    }
+
+    // (A5) countLines and computeWrap are SEPARATE passes (:662/:661/:697 vs
+    // :443/:442/:515) and must agree against a 2.x font at full magnitude, or a
+    // decode applied to one pass only sails through section 1 while silently
+    // mis-sizing every buffer countLines is asked to measure. Over the section-1
+    // corpus (drives :662/:697) and the kerned font under a wrap (drives :661).
+    for (let ci = 0; ci < corpus.length; ci++) {
+        const text = corpus[ci].text;
+        const boxWidth = corpus[ci].boxWidth;
+        for (let si = 0; si < SCALES.length; si++) {
+            const scale = SCALES[si];
+            const nc = TextLayout.computeWrap(text, BF, boxWidth, 0, 16, OUT, scale);
+            const cl = TextLayout.countLines(text, BF, boxWidth, 0, 16, scale);
+            check(cl === nc,
+                () => 'T8 A5 countLines/computeWrap: case ' + ci + ' scale ' + scale +
+                    ' countLines=' + cl + ' computeWrap=' + nc +
+                    ' -- the two passes decode the 2.x store differently');
+            decodeChecks++;
+        }
+    }
+    // The kerned countLines twin (:661): a boxWidth that forces 'ABAB' to wrap.
+    const cwK = TextLayout.computeWrap('ABAB', kern2x, 30, 0, 16, OUT, 1);
+    const clK = TextLayout.countLines('ABAB', kern2x, 30, 0, 16, 1);
+    check(clK === cwK,
+        () => 'T8 A5 kerned countLines: countLines=' + clK + ' computeWrap=' + cwK +
+            ' -- the countLines kerning decode (:661) diverged from computeWrap');
+    decodeChecks++;
+
+    // (A4) The CR-path decode (:377/:380) only bites when the CR (id 13) carries a
+    // NON-ZERO advance -- a hand-rolled atlas, out of contract but the exact shape
+    // the CR-subtraction exists for. With id 13 advance 5, 'AAA\r\nBBB' excludes
+    // the CR, so line 0 must equal the same text with a bare '\n'. If :377/:380
+    // read raw, the subtracted crAdv is 16x and the CRLF width stops matching LF.
+    // kern(A, CR) = -3 is what makes the CR-KERNING read (:380) falsifiable: with
+    // it zero the crAdv kerning term is 0 and a mutation there cannot redden. The
+    // CR is still fully excluded (its advance AND its kerning leave both cursorX
+    // and the subtracted crAdv), so line 0 still equals the bare-LF width.
+    const cr2x = new BitmapFont({}, {
+        common: { lineHeight: 16, base: 0 },
+        chars: [
+            { id: 65, x: 0, y: 0, width: 1, height: 1, xoffset: 0, yoffset: 0, xadvance: 12 },
+            { id: 66, x: 0, y: 0, width: 1, height: 1, xoffset: 0, yoffset: 0, xadvance: 12 },
+            { id: 13, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance: 5 },
+        ],
+        kernings: [{ first: 65, second: 13, amount: -3 }],
+    });
+    for (let si = 0; si < SCALES.length; si++) {
+        const scale = SCALES[si];
+        const nCrlf = TextLayout.computeWrap('AAA\r\nBBB', cr2x, 0, 0, 16, OUT, scale);
+        const wCrlf = OUT[2];
+        const nLf = TextLayout.computeWrap('AAA\nBBB', cr2x, 0, 0, 16, OUT, scale);
+        const wLf = OUT[2];
+        check(nCrlf === nLf && widthClose(wCrlf, wLf),
+            () => 'T8 A4 CRLF: line0 width CRLF ' + wCrlf + ' != LF ' + wLf + ' at scale ' + scale +
+                ' -- the CR-path decode (:377/:380) is un-folded, so the excluded CR advance is 16x');
+        decodeChecks++;
+    }
+
     process.stderr.write('torture: T8 cross-package: widthLines=' + lines +
         ' scales=' + SCALES.join('/') + ' TL-25=live(0.5/1/2) pixelLines=' + pixelLines +
-        ' TL-28=scoped(24!=19) (decisions 0003, 0004, 0006)\n');
+        ' TL-28-decode=covered(' + decodeChecks + ' checks) seam=scoped(24!=19)' +
+        ' (decisions 0001, 0003, 0004, 0005, 0006)\n');
 }

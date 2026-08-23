@@ -124,7 +124,8 @@ jitter. This package allocates nothing after you hand it the output buffer.
 - **Flag constants** -- `FLAG_NORMAL`, `FLAG_TRUNCATED`, `FLAG_OVERFLOW`, and
   `VERSION`. Flags are a value space compared by equality, never by truthiness.
 - **Zero runtime dependencies**, single-file ESM, full `.d.ts`. The output is
-  byte-for-byte the buffer `@zakkster/lite-bmfont`'s `drawWrapped` consumes.
+  byte-for-byte the buffer `@zakkster/lite-bmfont`'s `drawWrapped` consumes, on
+  both bmfont 1.x and 2.x (widths are decoded per format -- see below).
 
 Full types ship in [`TextLayout.d.ts`](./TextLayout.d.ts). Every export is
 documented.
@@ -287,7 +288,7 @@ views into one arena, which is correct code.
 | `FLAG_NORMAL`    | `0`       | Normal line.                                                    |
 | `FLAG_TRUNCATED` | `1`       | The TEXT did not fit the BOX; renderer appends `...`.           |
 | `FLAG_OVERFLOW`  | `2`       | The BUFFER did not fit the TEXT (a caller bug); set on the last written line. |
-| `VERSION`        | `'1.3.0'` | Package version string.                                         |
+| `VERSION`        | `'1.4.0'` | Package version string.                                         |
 
 **Law 6 -- flags are a value space; compare by equality, never by truthiness.**
 `if (flags === FLAG_TRUNCATED)`, never `if (flags)`. The domain may widen in a
@@ -411,7 +412,7 @@ bytes/frame across the whole layout-to-glyphs pipeline -- neither half allocates
 per frame, so a consumer can reason about which pairings are allocation-free.
 The TL5 torture lane gates the pair together (`computeWrap` + `drawWrapped` over
 a wrapped paragraph): verdict **pass**, **major 0, minor 0**, **0 B/op**.
-*Measured on 1.3.0, node v26.3.1 arm64.*
+*Measured on 1.4.0, node v26.3.1 arm64.*
 
 <!--RUN-->
 ```javascript
@@ -490,6 +491,16 @@ starts allocating fails the torture gate as loudly as a leak would.
   cross-package scale note (TL-25, filed against bmfont) is that `lineWidth` and
   the renderer's alignment math must agree on the same scale convention; both
   read this contract, so they do.
+- **bmfont 1.x and 2.x are both supported (TL-28).** lite-bmfont 2.0.0 moved its
+  advance and kerning stores to 1/16 fixed point (`stored * 0.0625`); 1.x stores
+  whole pixels. This package decodes by feature-detecting the font's `advanceOf`
+  accessor once at the input door -- present on 2.x, absent on 1.x -- and folds
+  the factor into the scale, so the per-character loop pays no extra branch and a
+  1.x font lays out byte-identically to before. `FORMAT_VERSION` is a bmfont
+  module export, not a property of the font object this package receives, so a
+  version handshake is not possible; the accessor is the only instance-reachable
+  signal. See
+  [`decisions/0005-bmfont-fixed-point.md`](./decisions/0005-bmfont-fixed-point.md).
 
 ## Testing
 

@@ -1,10 +1,20 @@
-# 0004 -- the non-ASCII kerning seam is a carved exception (TL-28)
+# 0004 -- the non-ASCII kerning seam is a carved exception
 
 Status: accepted
 Date: 2026-08-17
 Session: TL3 (v1.2.1)
-Findings: TL-28
-Related: decisions/0003-scale-contract.md
+Findings: the non-ASCII kerning seam (this record; historically labelled "TL-28")
+Related: decisions/0003-scale-contract.md, decisions/0005-bmfont-fixed-point.md
+
+> **Finding-ID note (added 2026-08-23, TL6).** This carved exception was
+> originally labelled **TL-28** here and in the 1.2.1 CHANGELOG. The ROADMAP
+> later assigned **TL-28** to a DIFFERENT, unrelated finding -- the bmfont 1/16
+> fixed-point advance/kerning decode (`decisions/0005`, closed in TL6/v1.4.0).
+> Two findings, one number. To end the collision going forward, THIS record is
+> referred to by name ("the non-ASCII kerning seam") and by its decision number
+> (0004), and "TL-28" now means the decode everywhere except the shipped 1.2.1
+> CHANGELOG entry, which is left unedited as historical record. The seam
+> behaviour described below is unchanged.
 
 ## Context
 

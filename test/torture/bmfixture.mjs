@@ -23,30 +23,48 @@
 
 import { BitmapFont } from '@zakkster/lite-bmfont';
 
-// A BitmapFont whose glyph ADVANCES match harness.FONT (letters 12, space 6,
-// '.' 6) so its `measure`/`measureLine` agree with computeWrap's rendered-scale
-// lineWidth on ASCII. Every drawable glyph also carries a 1x1 cell (offsets 2,3),
-// which the ellipsis geometry needs (TextLayout.js:330 reads glyphs['.'*7+2] > 0
-// before it counts an ellipsis width) and which makes drawWrapped's drawImage
-// fire so the placement detector can observe it. Built once, in this realm.
-export const BF_GLYPHS = new Int16Array(256 * 7);
-for (let id = 65; id <= 90; id++) { BF_GLYPHS[id * 7 + 2] = 1; BF_GLYPHS[id * 7 + 3] = 1; BF_GLYPHS[id * 7 + 6] = 12; }
-for (let id = 97; id <= 122; id++) { BF_GLYPHS[id * 7 + 2] = 1; BF_GLYPHS[id * 7 + 3] = 1; BF_GLYPHS[id * 7 + 6] = 12; }
-BF_GLYPHS[32 * 7 + 6] = 6;                                                 // space, no cell
-BF_GLYPHS[46 * 7 + 2] = 1; BF_GLYPHS[46 * 7 + 3] = 1; BF_GLYPHS[46 * 7 + 6] = 6;   // '.'
+// TL-28 / T-3: BF is built through the REAL bmfont 2.x constructor, from a
+// descriptor of WHOLE-PIXEL advances (letters 12, space 6, '.' 6). bmfont
+// encodes slot 6 to 1/16 fixed point itself (`round(xadvance * 16)`, so 12 ->
+// 192), and `advanceOf`/`measure`/`measureLine` decode it back with * 0.0625.
+// computeWrap (post-TL-28) detects the 2.x `advanceOf` accessor and decodes to
+// the SAME 12px, so the two agree at full magnitude.
+//
+// The prior fixture hand-poked whole-pixel values (12) straight into an
+// `Int16Array` on `BitmapFont.prototype`. That is a 1.x table wearing a 2.x
+// prototype: `advanceOf` reads it as 12 * 0.0625 = 0.75px, everything still
+// "agrees" at 1/16 magnitude, and every box-size calibration silently means
+// nothing. A whole-pixel stub is exactly what hid TL-28 for a full major, so it
+// is not used here. Every drawable glyph carries a 1x1 cell (width/height 1) so
+// the ellipsis geometry counts it (TextLayout.js reads glyphs['.'*7+2] > 0) and
+// drawWrapped's drawImage fires for the placement/pixel lanes. Built once.
+const BF_CHARS = [];
+for (let id = 65; id <= 90; id++) BF_CHARS.push({ id, x: 0, y: 0, width: 1, height: 1, xoffset: 0, yoffset: 0, xadvance: 12 });
+for (let id = 97; id <= 122; id++) BF_CHARS.push({ id, x: 0, y: 0, width: 1, height: 1, xoffset: 0, yoffset: 0, xadvance: 12 });
+BF_CHARS.push({ id: 32, x: 0, y: 0, width: 0, height: 0, xoffset: 0, yoffset: 0, xadvance: 6 });   // space, no cell
+BF_CHARS.push({ id: 46, x: 0, y: 0, width: 1, height: 1, xoffset: 0, yoffset: 0, xadvance: 6 });   // '.'
 
-/** A bmfont instance carrying those tables. `measure`/`measureLine`/`drawWrapped`
- * read only glyphs, kerning, atlas, base, lineHeight -- all set here; the atlas
- * is never sampled because drawImage is intercepted by the capturing ctx. */
-export const BF = Object.create(BitmapFont.prototype);
-BF.glyphs = BF_GLYPHS;
-BF.kerning = new Int16Array(65536);
-BF.atlas = {};
-BF.base = 0;
-BF.lineHeight = 16;
+/** A REAL bmfont 2.x instance. The atlas is never sampled -- drawImage is
+ * intercepted by the capturing ctxs -- so a bare object satisfies the door. */
+export const BF = new BitmapFont({}, { common: { lineHeight: 16, base: 0 }, chars: BF_CHARS });
 
-/** The '.' xadvance at scale 1 (6). */
-export const DOT_XADVANCE = BF_GLYPHS[46 * 7 + 6];
+/** The '.' xadvance in DECODED pixels at scale 1 (6). Read through the font's
+ * own accessor so the truncation-allowance math stays in the same pixel space
+ * as measureLine, not the raw 1/16 store. */
+export const DOT_XADVANCE = BF.advanceOf(46);
+
+// TL-28 / T-4: the 1.x regression witness (A3). A hand-rolled WHOLE-PIXEL font
+// with the same logical metrics as BF but NO `advanceOf` accessor -- a plain
+// object, deliberately not on `BitmapFont.prototype`. computeWrap must detect
+// the absent accessor, take advScale = 1, and read the store as whole pixels,
+// producing output BYTE-IDENTICAL to BF's (which decodes 192 -> 12). Forcing
+// advScale = 0.0625 unconditionally reddens the A3 lane that pairs them.
+const BF_1X_GLYPHS = new Int16Array(256 * 7);
+for (let id = 65; id <= 90; id++) { BF_1X_GLYPHS[id * 7 + 2] = 1; BF_1X_GLYPHS[id * 7 + 3] = 1; BF_1X_GLYPHS[id * 7 + 6] = 12; }
+for (let id = 97; id <= 122; id++) { BF_1X_GLYPHS[id * 7 + 2] = 1; BF_1X_GLYPHS[id * 7 + 3] = 1; BF_1X_GLYPHS[id * 7 + 6] = 12; }
+BF_1X_GLYPHS[32 * 7 + 6] = 6;
+BF_1X_GLYPHS[46 * 7 + 2] = 1; BF_1X_GLYPHS[46 * 7 + 3] = 1; BF_1X_GLYPHS[46 * 7 + 6] = 6;
+export const BF_1X = { glyphs: BF_1X_GLYPHS, kerning: new Int16Array(65536) };
 
 /** A canvas2d stub that records the dx of the FIRST drawImage and counts all
  * draws. drawImage(atlas, sx, sy, sw, sh, dx, dy, dw, dh): dx is arg index 5.

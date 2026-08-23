@@ -138,3 +138,33 @@ implemented as a resolution.
   equals the first `m` lines of the unbounded run, byte-identical except slot
   `4m - 1`, which is `FLAG_OVERFLOW` when `countLines > m` and equal otherwise.
 - This file is a planning artifact and is NOT added to `package.json` `files[]`.
+
+## Amendment (TL6, v1.4.0, 2026-08-23): the "inert in drawWrapped" premise is now checked-lane-dependent
+
+The MINOR argument above rested on a load-bearing fact about the consumer: that
+`FLAG_OVERFLOW` (2) is inert in `BitmapFont.drawWrapped` because the peer keyed
+its ellipsis on `flags === 1`, so a `2` fell through harmlessly. That was true
+against `@zakkster/lite-bmfont` 1.x.
+
+**bmfont 2.0 (F-49) changed it.** `drawWrapped` now runs a flags-mask door:
+`if (checked && (f & ~FLAG_MASK)) throw`, with `FLAG_MASK === 1`. So against a
+2.x font:
+
+- **checked (the default): a `FLAG_OVERFLOW` line THROWS** a `BitmapFontError`.
+  It is no longer inert -- the peer refuses to render a layout it was told is
+  incomplete.
+- **`checked: false`: still inert** (ignored, no ellipsis) -- the 1.x behaviour.
+
+This does NOT reopen the MINOR-vs-MAJOR decision for THIS package: nothing here
+changed, `FLAG_OVERFLOW` is still `2`, and the value is still only ever reachable
+on a call that under-sized its buffer (a caller bug). If anything the peer's new
+throw AGREES with this package's fail-closed law: an overflow flag means "size
+the buffer with `countLines`", and a checked 2.x peer now enforces exactly that
+rather than silently rendering a truncated paragraph that looks deliberate --
+the original TL-01 failure mode, closed on the consumer's side too.
+
+What changed is a DOCUMENTED fact about the pairing, pinned executably in
+`test/torture/t8-cross.mjs` section 4 (both the checked-throws and the
+checked:false-inert directions) so a future peer bump cannot move it silently.
+Found while decoding the 2.x store for TL-28; it is a sibling cross-package
+finding, not part of the decode itself.

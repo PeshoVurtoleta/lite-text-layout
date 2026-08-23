@@ -4,6 +4,76 @@ All notable changes to `@zakkster/lite-text-layout` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-23
+
+Decode `@zakkster/lite-bmfont`'s 1/16 fixed-point store (TL-28). bmfont 2.0.0
+moved glyph advance and the 64K kerning LUT to 1/16 fixed point (`stored *
+0.0625`); this package read both raw, so against any bmfont `>= 2.0.0` font every
+computed width was EXACTLY 16x too large and wrapping collapsed silently -- a
+306-char paragraph at `boxWidth` 560 wrapped to 97 lines instead of 7, with no
+throw. It was invisible locally because the repo pinned bmfont `^1.6.0` and every
+test measured the pre-2.0 whole-pixel format; the break lived only in the gap
+where `lite-bmfont@2.x` and `lite-text-layout@1.3.0` were both live on npm and
+both READMEs advertised the pairing. Filed in the peer as F-56.
+
+**Correct pairings.** `lite-text-layout >= 1.4.0` supports lite-bmfont **1.x and
+2.x**. `lite-text-layout <= 1.3.0` is correct ONLY with lite-bmfont **1.x**;
+pairing `<= 1.3.0` with lite-bmfont `>= 2.0.0` produces silently 16x geometry and
+should be upgraded to 1.4.0.
+
+### Fixed
+
+- **The advance/kerning decode (TL-28).** All nine store reads across
+  `computeWrap` and `countLines` now fold the decode factor into the scale
+  (`s16 = scale * advScale`), mirroring bmfont's own `_measureRange`
+  (`s16 = scale * 0.0625`) term-for-term so the two packages agree to the ULP.
+  The factor is chosen ONCE at the shared input door by feature-detecting the
+  font's `advanceOf` accessor: `0.0625` for a 2.x font, `1` for a 1.x or
+  hand-rolled whole-pixel font. `FORMAT_VERSION` is a bmfont MODULE export, not a
+  property of the font object this package receives, so a version handshake is
+  impossible; the accessor is the only instance-reachable signal. See
+  [`decisions/0005-bmfont-fixed-point.md`](./decisions/0005-bmfont-fixed-point.md).
+  A 1.x font is byte-identical to 1.3.0 (`advScale === 1`, so `s16 === scale`
+  exactly). Hot path: one entry-time multiply, zero added per-character
+  multiplies, zero new branches -- T6 still gates major 0 / minor 0 / 0 B/op.
+
+### Changed
+
+- **bmfont devDependency floor `^1.6.0` -> `^2.0.1`** (installed 2.0.2). bmfont
+  remains a TEST-ONLY devDependency in both directions; this package keeps zero
+  runtime dependencies.
+- **Cross-package flag contract, documented (a sibling of TL-28, found while
+  decoding).** bmfont 2.0 (F-49) added a flags-mask door to `drawWrapped`: a
+  `FLAG_OVERFLOW` (2) line now THROWS under a default (`checked`) 2.x font, where
+  1.x silently ignored it. This is fail-closed and AGREES with this package -- an
+  overflow flag means the caller under-sized the buffer (size it with
+  `countLines`) -- but it means the "inert in drawWrapped" premise in
+  `decisions/0001-flag-overflow.md` is now `checked`-lane-dependent. Pinned in T8
+  section 4 (both the checked-throws and the `checked:false`-inert directions);
+  the amendment is recorded in decision 0001.
+
+### Testing
+
+- **Real 2.x fixtures.** `test/torture/bmfixture.mjs` now builds its `BitmapFont`
+  through the actual 2.x constructor from whole-pixel advances (bmfont encodes
+  slot 6 to `round(xadvance * 16)`), not a hand-poked whole-pixel `Int16Array` on
+  the prototype -- that stub, which decodes 16x too small under 2.x, is exactly
+  what hid this for a full major.
+- **New T8 lanes.** Section 1b: a 1.x vs 2.x byte-identity witness (the A3
+  regression guard). Section 7: decode-site coverage across all nine reads
+  (kerned width agreement, `countLines`/`computeWrap` agreement on a 2.x font,
+  and CRLF-vs-LF identity on a CR-nonzero font), each proven to redden by an
+  applied sandbox mutation.
+
+### Note on finding IDs
+
+- **"TL-28" is used for two unrelated findings in this project's history.** The
+  1.2.1 CHANGELOG (below) and `decisions/0004` labelled the non-ASCII
+  kerning-seam divergence "TL-28"; the ROADMAP later assigned "TL-28" to the
+  fixed-point decode fixed here. Going forward "TL-28" means the decode
+  (`decisions/0005`); the kerning seam is referred to by name and by decision
+  0004. The historical 1.2.1 entry is left unedited.
+
 ## [1.3.0] - 2026-08-19
 
 The allocation-free pipeline, proven end to end. `@zakkster/lite-bmfont` shipped
